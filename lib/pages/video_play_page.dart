@@ -164,7 +164,12 @@ class _VideoPlayItemState extends State<VideoPlayItem> with WidgetsBindingObserv
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this); // 监听前后台切换（后台播放）
-    _vpc = VideoPlayerController.file(File(widget.model.filePath));
+    // mixWithOthers=true → 关闭 ExoPlayer 的自动音频焦点管理（handleAudioFocus=false），
+    // 息屏/锁屏后系统回收焦点时不再自动 pause，配合前台保活服务实现真正的后台续播。
+    _vpc = VideoPlayerController.file(
+      File(widget.model.filePath),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
     _vpc.addListener(_onVideoChanged);
     _vpc.initialize().then((_) {
       if (!mounted) return;
@@ -314,7 +319,14 @@ class _VideoPlayItemState extends State<VideoPlayItem> with WidgetsBindingObserv
     // 后台播放关闭：切后台/锁屏则暂停，避免离开后继续出声
     // 后台播放开启：不暂停，音频在后台/锁屏继续（配合前台保活服务）
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      if (!widget.backgroundPlay.value && _vpc.value.isPlaying) {
+      if (widget.backgroundPlay.value) {
+        // 后台播放：不暂停；并作为保底，确保进入后台后仍在播放（对抗任何意外暂停）
+        if (_initialized && !_vpc.value.isPlaying) {
+          _vpc.play();
+          _isPlaying = true;
+        }
+      } else if (_vpc.value.isPlaying) {
+        // 未开启后台播放：切后台/锁屏则暂停，避免离开后继续出声
         _vpc.pause();
         _isPlaying = false;
         if (mounted) setState(() {});

@@ -265,7 +265,8 @@ def main():
     print(f"[artifact] {art['name']} (id={art['id']})")
 
     os.makedirs(args.out_dir, exist_ok=True)
-    zip_path = os.path.join(args.out_dir, "_release_artifact.zip")
+    # 用构件 id 作唯一文件名，避开被系统锁定的旧 _release_artifact.zip
+    zip_path = os.path.join(args.out_dir, f"_release_artifact_{art['id']}.zip")
     url = f"{API}/repos/{owner}/{repo}/actions/artifacts/{art['id']}/zip"
     req = urllib.request.Request(url)
     req.add_header("Authorization", "token " + token)
@@ -288,10 +289,15 @@ def main():
         apk_bytes = z.read(apk_entries[0])
     latest_path = os.path.join(args.out_dir, "app-release.apk")
     versioned_path = os.path.join(args.out_dir, f"app-release-{new_ver}.apk")
-    with open(latest_path, "wb") as f:
-        f.write(apk_bytes)
+    # 带版本号文件始终写出（唯一，不被锁）
     with open(versioned_path, "wb") as f:
         f.write(apk_bytes)
+    # 别名文件 app-release.apk 可能被系统锁定无法覆盖，非致命
+    try:
+        with open(latest_path, "wb") as f:
+            f.write(apk_bytes)
+    except Exception as e:
+        print(f"[warn] 无法覆盖别名 app-release.apk（被锁定，可忽略，请用版本化文件名安装）: {e}")
     # 沙箱环境回收站不可用，删除可能被拦截；非致命，仅提示
     try:
         os.remove(zip_path)
