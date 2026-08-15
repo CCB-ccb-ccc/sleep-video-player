@@ -191,7 +191,7 @@ def main():
     print(f"[tree] 新 tree: {new_tree[:8]}")
 
     # 4. 创建提交（不写 reflog / refs）
-    msg = f"feat: 设置页/文件夹选择/自动隐藏控制/横屏按钮 + release v{new_ver}"
+    msg = f"feat: 顶部文件夹切换导航栏(可自定义名称) + 播放页进入即隐藏控制面板 + release v{new_ver}"
     r = subprocess.run(f'git commit-tree {new_tree} -p {parent} -m "{msg}"',
                        cwd=PROJ, capture_output=True, text=True, shell=True, env=env)
     if r.returncode != 0:
@@ -292,7 +292,11 @@ def main():
         f.write(apk_bytes)
     with open(versioned_path, "wb") as f:
         f.write(apk_bytes)
-    os.remove(zip_path)
+    # 沙箱环境回收站不可用，删除可能被拦截；非致命，仅提示
+    try:
+        os.remove(zip_path)
+    except Exception as e:
+        print(f"[warn] 无法删除临时 zip（沙箱限制，可忽略）: {e}")
 
     size_mb = len(apk_bytes) / 1024 / 1024
     print("[done] 发布完成：")

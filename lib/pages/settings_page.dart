@@ -4,6 +4,7 @@ import '../core/folder_store.dart';
 import '../core/video_scan_utils.dart';
 
 /// 设置页：让用户自行指定一个或多个视频文件夹（不再全盘遍历手机）。
+/// 每个文件夹可自定义显示名称，用于播放页顶部切换栏的按钮文案。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
@@ -12,7 +13,7 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  List<String> _folders = [];
+  List<FolderEntry> _folders = [];
   bool _refreshing = false;
 
   @override
@@ -22,8 +23,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _loadFolders() async {
-    final folders = await FolderStore.getFolders();
-    if (mounted) setState(() => _folders = folders);
+    final entries = await FolderStore.getEntries();
+    if (mounted) setState(() => _folders = entries);
   }
 
   /// 通过系统文件夹选择器添加一个视频文件夹（可多次添加）。
@@ -32,20 +33,62 @@ class _SettingsPageState extends State<SettingsPage> {
       dialogTitle: '选择包含视频的文件夹',
     );
     if (path == null) return; // 用户取消
-    if (_folders.contains(path)) {
+    if (_folders.any((e) => e.path == path)) {
       _snack('该文件夹已添加');
       return;
     }
-    final next = [..._folders, path];
-    await FolderStore.saveFolders(next); // 持久化并广播变更
+    final next = [
+      ..._folders,
+      FolderEntry(path: path, label: FolderStore.defaultLabel(path)),
+    ];
+    await FolderStore.saveEntries(next); // 持久化并广播变更
     if (mounted) setState(() => _folders = next);
     _snack('已添加文件夹');
   }
 
   /// 移除某个文件夹。
-  Future<void> _removeFolder(String path) async {
-    final next = _folders.where((e) => e != path).toList();
-    await FolderStore.saveFolders(next);
+  Future<void> _removeFolder(FolderEntry entry) async {
+    final next = _folders.where((e) => e.path != entry.path).toList();
+    await FolderStore.saveEntries(next);
+    if (mounted) setState(() => _folders = next);
+  }
+
+  /// 重命名某个文件夹的自定义显示名。
+  Future<void> _renameFolder(FolderEntry entry) async {
+    final ctrl = TextEditingController(text: entry.label);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('自定义名称', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: '例如：睡前视频、旅行记录',
+            hintStyle: TextStyle(color: Colors.grey),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('确定', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (name == null) return;
+    final label = name.isEmpty ? FolderStore.defaultLabel(entry.path) : name;
+    final next = _folders
+        .map((e) =>
+            e.path == entry.path ? FolderEntry(path: e.path, label: label) : e)
+        .toList();
+    await FolderStore.saveEntries(next);
     if (mounted) setState(() => _folders = next);
   }
 
@@ -86,7 +129,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           const Text(
             '请选择存放视频的文件夹（可添加多个）。应用只会扫描你指定的文件夹，'
-            '不会遍历整台手机。',
+            '不会遍历整台手机。点击文件夹可自定义它在播放页顶部的名称。',
             style: TextStyle(color: Colors.grey, fontSize: 13),
           ),
           const SizedBox(height: 16),
@@ -130,7 +173,10 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _folderTile(String path) {
+  Widget _folderTile(FolderEntry entry) {
+    final displayName = entry.label.isEmpty
+        ? FolderStore.defaultLabel(entry.path)
+        : entry.label;
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
@@ -140,14 +186,28 @@ class _SettingsPageState extends State<SettingsPage> {
       child: ListTile(
         leading: const Icon(Icons.folder, color: Colors.white70),
         title: Text(
-          path,
-          style: const TextStyle(color: Colors.white, fontSize: 13),
-          maxLines: 2,
+          displayName,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+        ),
+        subtitle: Text(
+          entry.path,
+          style: const TextStyle(color: Colors.grey, fontSize: 12),
+          maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          onPressed: () => _removeFolder(path),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.edit_note, color: Colors.white70),
+              tooltip: '自定义名称',
+              onPressed: () => _renameFolder(entry),
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              onPressed: () => _removeFolder(entry),
+            ),
+          ],
         ),
       ),
     );

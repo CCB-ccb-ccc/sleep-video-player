@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import '../core/folder_store.dart';
 import '../core/permission_utils.dart';
 import '../core/video_scan_utils.dart';
 import '../models/local_video_model.dart';
 import '../widgets/video_grid_item.dart';
 
-/// 首页视频网格列表页（任务 4 / 改造为按文件夹扫描）
+/// 首页视频网格列表页（任务 4 / 改造：按文件夹扫描 + 顶部文件夹切换栏）
 class VideoListPage extends StatefulWidget {
   final VoidCallback? onGoSettings;
 
@@ -17,13 +18,15 @@ class VideoListPage extends StatefulWidget {
 
 class _VideoListPageState extends State<VideoListPage> {
   List<LocalVideoModel> _videos = [];
+  List<FolderEntry> _folders = [];
+  String? _selectedFolder; // null = 全部
   bool _loading = false;
   bool _permissionDenied = false;
 
   @override
   void initState() {
     super.initState();
-    // 设置页增删文件夹后自动重新扫描（通过 FolderStore.changed 通知）
+    // 设置页增删/改名文件夹后自动刷新（通过 FolderStore.changed 通知）
     FolderStore.changed.addListener(_onFoldersChanged);
     _init();
   }
@@ -35,7 +38,8 @@ class _VideoListPageState extends State<VideoListPage> {
   }
 
   void _onFoldersChanged() {
-    // 文件夹集合变化：重新加载（权限已在前次加载中处理）
+    // 文件夹集合/名称变化：重新加载文件夹与视频
+    _loadFolders();
     _loadVideos();
   }
 
@@ -46,7 +50,22 @@ class _VideoListPageState extends State<VideoListPage> {
       if (mounted) setState(() => _permissionDenied = true);
       return;
     }
+    await _loadFolders();
     await _loadVideos();
+  }
+
+  Future<void> _loadFolders() async {
+    final entries = await FolderStore.getEntries();
+    if (mounted) {
+      setState(() {
+        _folders = entries;
+        // 选中的文件夹若已被移除，回到「全部」
+        if (_selectedFolder != null &&
+            !entries.any((e) => e.path == _selectedFolder)) {
+          _selectedFolder = null;
+        }
+      });
+    }
   }
 
   Future<void> _loadVideos() async {
@@ -87,11 +106,49 @@ class _VideoListPageState extends State<VideoListPage> {
     }
   }
 
+  /// 按当前选中的文件夹筛选视频；null = 全部。
+  List<LocalVideoModel> get _displayed {
+    if (_selectedFolder == null) return _videos;
+    return _videos
+        .where((v) => p.isWithin(_selectedFolder!, v.filePath))
+        .toList();
+  }
+
   void _openVideo(int index) {
-    // 携带完整列表 + 点击索引跳转到播放页（任务 4.6）
+    // 携带筛选后的列表 + 点击索引跳转到播放页（任务 4.6）
     Navigator.of(context).pushNamed(
       '/play',
-      arguments: {'videos': _videos, 'index': index},
+      arguments: {'videos': _displayed, 'index': index},
+    );
+  }
+
+  /// 顶部文件夹切换导航栏：全部 + 各文件夹（显示自定义名）
+  Widget _buildFolderNav() {
+    final chips = <Widget>[
+      _chip(null, '全部'),
+    ];
+    for (final e in _folders) {
+      final name = e.label.isEmpty ? FolderStore.defaultLabel(e.path) : e.label;
+      chips.add(_chip(e.path, name));
+      chips.add(const SizedBox(width: 8));
+    }
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Row(children: chips),
+    );
+  }
+
+  Widget _chip(String? path, String label) {
+    final selected = _selectedFolder == path;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => setState(() => _selectedFolder = path),
+      backgroundColor: const Color(0xFF1A1A1A),
+      selectedColor: Colors.white,
+      labelStyle: TextStyle(color: selected ? Colors.black : Colors.white),
+      visualDensity: VisualDensity.compact,
     );
   }
 
@@ -102,7 +159,7 @@ class _VideoListPageState extends State<VideoListPage> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         elevation: 0,
-        // 顶部仅一个【重新扫描】按钮，无其他控件（任务 4.4）
+        title: const Text('播放', style: TextStyle(color: Colors.white)),
         actions: [
           TextButton(
             onPressed: _loading ? null : _onRescan,
@@ -110,6 +167,11 @@ class _VideoListPageState extends State<VideoListPage> {
                 style: TextStyle(color: Colors.white)),
           ),
         ],
+        // 顶部文件夹切换栏（任务：直接在播放页顶部切换文件夹）
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(44),
+          child: _buildFolderNav(),
+        ),
       ),
       body: _buildBody(),
     );
@@ -163,7 +225,35 @@ class _VideoListPageState extends State<VideoListPage> {
         ),
       );
     }
-    // 双列网格展示（任务 4.2）
+    if (_displayed.isEmpty) {
+      // 当前文件夹筛选后无视频（其它文件夹有内容时）
+      final name = _selectedFolder == null
+          ? ''
+          : _folders
+              .firstWhere((e) => e.path == _selectedFolder,
+                  orElse: () => FolderEntry(path: '', label: ''))
+              .label;
+      final title = name.isEmpty ? '该文件夹' : '「$name」';
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text('$title 暂无视频',
+                  style: const TextStyle(color: Colors.white, fontSize: 16)),
+              const SizedBox(height: 8),
+              const Text(
+                '可切换到其它文件夹，或在设置页重新扫描',
+                style: TextStyle(color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    // 双列网格展示（任务 4.2），按当前选中的文件夹筛选
     return GridView.builder(
       padding: const EdgeInsets.all(2),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -172,10 +262,10 @@ class _VideoListPageState extends State<VideoListPage> {
         mainAxisSpacing: 2,
         childAspectRatio: 0.75,
       ),
-      itemCount: _videos.length,
+      itemCount: _displayed.length,
       itemBuilder: (context, index) {
         return VideoGridItem(
-          video: _videos[index],
+          video: _displayed[index],
           onTap: () => _openVideo(index),
         );
       },

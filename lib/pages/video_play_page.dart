@@ -107,7 +107,8 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
   late VideoPlayerController _vpc;
   ChewieController? _chewieController;
   bool _initialized = false;
-  bool _showControls = true;
+  // 进入播放默认完全隐藏控制面板，用户点击屏幕才临时显示（任务：用户看不到的程度）
+  bool _showControls = false;
   bool _isPlaying = true;
   Timer? _autoHideTimer;
 
@@ -133,9 +134,8 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
         setState(() {
           _initialized = true;
           _isPlaying = true;
+          _showControls = false; // 进入即隐藏，不闪现控制面板
         });
-        // 进入播放后控制面板自动隐藏（不再需要再点一下才消）
-        _scheduleAutoHide();
       }
     }).catchError((_) {
       if (mounted) setState(() => _initialized = true);
