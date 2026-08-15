@@ -35,6 +35,32 @@ class MainActivity : FlutterActivity() {
                             result.error("STOP_FAILED", e.message, null)
                         }
                     }
+                    // 申请电池优化豁免：打开系统“允许后台运行/不受电池优化限制”设置页，
+                    // 华为 / 荣耀等激进省电机型必须用户手动放行，否则前台服务仍会被杀。
+                    "requestBatteryExemption" -> {
+                        try {
+                            val intent = Intent(
+                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                            )
+                            intent.data = android.net.Uri.parse("package:$packageName")
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(intent)
+                            result.success(null)
+                        } catch (e: Exception) {
+                            // 部分国产 ROM 没有该标准页，退化为打开应用详情页
+                            try {
+                                val fallback = Intent(
+                                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                )
+                                fallback.data = android.net.Uri.parse("package:$packageName")
+                                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(fallback)
+                                result.success(null)
+                            } catch (e2: Exception) {
+                                result.error("EXEMPT_FAILED", e2.message, null)
+                            }
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }

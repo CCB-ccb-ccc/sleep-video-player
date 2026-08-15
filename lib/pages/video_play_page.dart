@@ -17,6 +17,11 @@ Future<void> _startBgService() async {
   try {
     await Permission.notification.request();
   } catch (_) {}
+  // 申请电池优化豁免：打开系统设置页，引导用户允许本 App 后台运行。
+  // 华为 / 荣耀等激进省电机型必须用户手动放行，否则前台服务仍会被杀、息屏即停。
+  try {
+    await _bgChannel.invokeMethod<void>('requestBatteryExemption');
+  } catch (_) {}
   try {
     await _bgChannel.invokeMethod<void>('start');
   } catch (_) {}
@@ -307,7 +312,25 @@ class _VideoPlayItemState extends State<VideoPlayItem> with WidgetsBindingObserv
     return ValueListenableBuilder<bool>(
       valueListenable: widget.backgroundPlay,
       builder: (_, bg, _) => TextButton.icon(
-        onPressed: () => widget.onToggleBackground(!bg),
+        onPressed: () {
+          final willOn = !bg;
+          widget.onToggleBackground(willOn);
+          if (willOn && mounted) {
+            // 华为 / 荣耀等机型：仅仅开“后台”还不够，必须到系统设置里
+            // 把本 App 设为“允许后台运行 / 不受电池优化限制 / 加入受保护应用”，
+            // 否则前台服务仍会被系统杀掉、息屏即停。这里给出明确引导。
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                duration: Duration(seconds: 8),
+                content: Text(
+                  '已尝试打开电池设置，请允许本应用“后台运行/不受限制”；'
+                  '华为/荣耀还需到 设置→应用→助眠播放器→电池→改为“不受限制”并加入受保护应用。',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            );
+          }
+        },
         icon: Icon(
           bg ? Icons.headset : Icons.headset_off,
           color: bg ? Colors.amber : Colors.white,
