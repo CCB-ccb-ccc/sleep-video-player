@@ -4,9 +4,31 @@ import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../models/local_video_model.dart';
 
-/// 上下滑动短视频播放页（任务 5 / 改造：自动隐藏面板 + 横屏按钮）
+/// 后台保活服务通道：开启后让进程以“前台服务”身份存活，
+/// 息屏 / 切后台也不会被系统回收，音频得以继续（这是之前息屏就停的根本原因）。
+const MethodChannel _bgChannel = MethodChannel('com.sleep.localvideoplayer/background');
+
+Future<void> _startBgService() async {
+  // 尽量申请通知权限，使前台服务通知可见（失败也不影响保活）
+  try {
+    await Permission.notification.request();
+  } catch (_) {}
+  try {
+    await _bgChannel.invokeMethod<void>('start');
+  } catch (_) {}
+}
+
+Future<void> _stopBgService() async {
+  try {
+    await _bgChannel.invokeMethod<void>('stop');
+  } catch (_) {}
+}
+
+/// 上下滑动短视频播放页（任务 5 / 改造：自动隐藏面板 + 横屏按钮 + 后台播放保活）
 class VideoPlayPage extends StatefulWidget {
   final List<LocalVideoModel> videos;
   final int initialIndex;
@@ -25,6 +47,8 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
   late PageController _pageController;
   // 横屏状态在页面级统一管理：所有视频项共享，离开页面复位竖屏
   final ValueNotifier<bool> _landscape = ValueNotifier<bool>(false);
+  // 后台播放开关（页面级，所有视频项共享）
+  final ValueNotifier<bool> _backgroundPlay = ValueNotifier<bool>(false);
 
   @override
   void initState() {
@@ -32,6 +56,8 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     // 强制全屏沉浸式（任务 5.1.1），进入页隐藏状态栏/导航栏
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _pageController = PageController(initialPage: widget.initialIndex);
+    // 默认前台观看：保持屏幕常亮
+    WakelockPlus.enable().catchError((_) {});
   }
 
   /// 切换横/竖屏
@@ -49,13 +75,29 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     }
   }
 
+  /// 切换后台播放：开启则启动前台保活服务并允许息屏（音频继续）；
+  /// 关闭则恢复常亮并停止服务
+  void _setBackgroundPlay(bool on) {
+    _backgroundPlay.value = on;
+    if (on) {
+      WakelockPlus.disable().catchError((_) {}); // 息屏/切后台时允许屏幕熄灭，声音继续
+      _startBgService();
+    } else {
+      WakelockPlus.enable().catchError((_) {}); // 恢复常亮（前台观看）
+      _stopBgService();
+    }
+  }
+
   @override
   void dispose() {
+    _stopBgService();
+    WakelockPlus.enable().catchError((_) {}); // 离开播放页恢复默认常亮
     _pageController.dispose();
     // 离开页面：复位竖屏并恢复系统 UI（任务 5.1.1）
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _landscape.dispose();
+    _backgroundPlay.dispose();
     super.dispose();
   }
 
@@ -77,7 +119,9 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
             return VideoPlayItem(
               model: widget.videos[index],
               landscape: _landscape,
+              backgroundPlay: _backgroundPlay,
               onToggleOrientation: _toggleOrientation,
+              onToggleBackground: _setBackgroundPlay,
             );
           },
         ),
@@ -90,12 +134,16 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
 class VideoPlayItem extends StatefulWidget {
   final LocalVideoModel model;
   final ValueNotifier<bool> landscape;
+  final ValueNotifier<bool> backgroundPlay;
   final VoidCallback onToggleOrientation;
+  final ValueChanged<bool> onToggleBackground;
 
   const VideoPlayItem({
     required this.model,
     required this.landscape,
+    required this.backgroundPlay,
     required this.onToggleOrientation,
+    required this.onToggleBackground,
     super.key,
   });
 
@@ -242,34 +290,31 @@ class _VideoPlayItemState extends State<VideoPlayItem> with WidgetsBindingObserv
     setState(() {});
   }
 
-  // ===== 后台播放 =====
-  bool _backgroundPlay = false;
-
+  // ===== 后台播放按钮（读取页面级 notifier） =====
   Widget _buildBackgroundButton() {
-    return TextButton.icon(
-      onPressed: _toggleBackground,
-      icon: Icon(
-        _backgroundPlay ? Icons.headset : Icons.headset_off,
-        color: _backgroundPlay ? Colors.amber : Colors.white,
-        size: 20,
-      ),
-      label: Text(
-        _backgroundPlay ? '后台开' : '后台',
-        style: TextStyle(color: _backgroundPlay ? Colors.amber : Colors.white, fontSize: 12),
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.backgroundPlay,
+      builder: (_, bg, _) => TextButton.icon(
+        onPressed: () => widget.onToggleBackground(!bg),
+        icon: Icon(
+          bg ? Icons.headset : Icons.headset_off,
+          color: bg ? Colors.amber : Colors.white,
+          size: 20,
+        ),
+        label: Text(
+          bg ? '后台开' : '后台',
+          style: TextStyle(color: bg ? Colors.amber : Colors.white, fontSize: 12),
+        ),
       ),
     );
-  }
-
-  void _toggleBackground() {
-    setState(() => _backgroundPlay = !_backgroundPlay);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 后台播放关闭：切后台/锁屏则暂停，避免离开后继续出声
-    // 后台播放开启：不暂停，音频在后台/锁屏继续（Android ExoPlayer 默认行为）
+    // 后台播放开启：不暂停，音频在后台/锁屏继续（配合前台保活服务）
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      if (!_backgroundPlay && _vpc.value.isPlaying) {
+      if (!widget.backgroundPlay.value && _vpc.value.isPlaying) {
         _vpc.pause();
         _isPlaying = false;
         if (mounted) setState(() {});

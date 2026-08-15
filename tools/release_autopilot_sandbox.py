@@ -191,7 +191,7 @@ def main():
     print(f"[tree] 新 tree: {new_tree[:8]}")
 
     # 4. 创建提交（不写 reflog / refs）
-    msg = f"feat: 顶部文件夹切换导航栏(可自定义名称) + 播放页进入即隐藏控制面板 + release v{new_ver}"
+    msg = f"feat: 定时关闭(15分钟间隔,最长2小时) + 后台播放 + 播放页顶部控制栏 + release v{new_ver}"
     r = subprocess.run(f'git commit-tree {new_tree} -p {parent} -m "{msg}"',
                        cwd=PROJ, capture_output=True, text=True, shell=True, env=env)
     if r.returncode != 0:

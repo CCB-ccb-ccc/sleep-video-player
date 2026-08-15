@@ -3,6 +3,10 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- 后台播放：前台保活服务所需权限 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="助眠播放器"
         android:name="${applicationName}"
@@ -34,6 +38,11 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- 后台播放保活服务：开启后进程以前台身份存活，息屏/切后台音频不断 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
