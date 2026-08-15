@@ -1,0 +1,77 @@
+import 'package:audio_service/audio_service.dart';
+import 'package:just_audio/just_audio.dart';
+
+/// 音频服务处理器：用 just_audio 播放“同一视频文件”的音频轨道。
+///
+/// 关键：它运行在 audio_service 提供的 Android 媒体服务（MediaBrowserService）中，
+/// 该服务独立于 Flutter 的 Activity —— 因此息屏 / 切后台 / 锁屏时，即使 Activity 被系统回收，
+/// 媒体服务仍会继续出声。这正是 video_player（绑定 Activity）在华为上息屏即停的根本解法。
+class AudioPlayerHandler extends BaseAudioHandler with SeekHandler {
+  final AudioPlayer _player = AudioPlayer();
+  String? _loadedPath;
+
+  AudioPlayerHandler() {
+    // 将 just_audio 的播放状态同步到系统媒体通知（锁屏/通知栏可见）
+    _player.playbackEventStream.listen((_) {
+      final playing = _player.playing;
+      playbackState.add(
+        playbackState.value.copyWith(
+          controls: [
+            if (playing) MediaControl.pause else MediaControl.play,
+            MediaControl.stop,
+          ],
+          systemActions: const {
+            MediaAction.seek,
+            MediaAction.seekForward,
+            MediaAction.seekBackward,
+          },
+          androidCompactActions: const [0, 1],
+          processingState: const {
+            ProcessingState.idle: AudioProcessingState.idle,
+            ProcessingState.loading: AudioProcessingState.loading,
+            ProcessingState.buffering: AudioProcessingState.buffering,
+            ProcessingState.ready: AudioProcessingState.ready,
+            ProcessingState.completed: AudioProcessingState.completed,
+          }[_player.processingState]!,
+          playing: playing,
+          updatePosition: _player.position,
+          bufferedPosition: _player.bufferedPosition,
+          speed: _player.speed,
+        ),
+      );
+    });
+  }
+
+  /// 加载本地文件（视频文件仅取音频轨道）。同一路径只加载一次。
+  Future<Duration?> loadFile(String path) async {
+    if (_loadedPath == path &&
+        _player.processingState != ProcessingState.idle) {
+      return _player.duration;
+    }
+    _loadedPath = path;
+    final duration = await _player.setAudioSource(AudioSource.file(path));
+    mediaItem.add(
+      MediaItem(
+        id: path,
+        album: '助眠播放器',
+        title: path.split('/').last,
+        duration: duration,
+      ),
+    );
+    return duration;
+  }
+
+  @override
+  Future<void> play() => _player.play();
+
+  @override
+  Future<void> pause() => _player.pause();
+
+  @override
+  Future<void> stop() => _player.stop();
+
+  @override
+  Future<void> seek(Duration position) => _player.seek(position);
+
+  AudioPlayer get player => _player;
+}

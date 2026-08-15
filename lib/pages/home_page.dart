@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'settings_page.dart';
 import 'video_list_page.dart';
 
@@ -13,6 +14,14 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // 请求通知权限：音频服务（后台续播）依赖前台媒体通知，
+    // Android 13+ 必须获授权，否则通知被禁、媒体前台服务会被系统杀。
+    Permission.notification.request();
+  }
 
   // 由首页持有，切换 tab 时传递给列表页（用于「去设置」空态按钮）
   void _goSettings() => setState(() => _tab = 1);

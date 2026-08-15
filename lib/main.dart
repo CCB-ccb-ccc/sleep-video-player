@@ -1,13 +1,30 @@
 import 'package:flutter/material.dart';
+import 'package:audio_service/audio_service.dart';
+import 'audio/audio_player_handler.dart';
 import 'models/local_video_model.dart';
 import 'pages/home_page.dart';
 import 'pages/video_play_page.dart';
 
-void main() {
+Future<void> main() async {
+  // 必须在 AudioService.init 之前初始化 Flutter 绑定
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 初始化音频服务：启动真正的 Android 媒体服务（独立于 Activity），
+  // 这是息屏 / 后台能稳定续播的关键引擎。
+  await AudioService.init(
+    builder: () => AudioPlayerHandler(),
+    config: AudioServiceConfig(
+      androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
+      androidNotificationChannelName: '助眠播放器',
+      androidNotificationOngoing: true,
+      androidShowNotificationBadge: false,
+    ),
+  );
+
   runApp(const MyApp());
 }
 
-/// 全局入口与主题（任务 6）
+/// 全局入口与主题
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -15,7 +32,6 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '助眠播放器',
-      // 全局深色黑色主题（任务 6.1）：主底色 #000000，辅助灰 #1A1A1A（规范 G4）
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: Colors.black,
         primaryColor: Colors.black,
@@ -25,7 +41,6 @@ class MyApp extends StatelessWidget {
         ),
       ),
       initialRoute: '/',
-      // 路由栈统一管理：命名路由，播放页返回用 pop（任务 6.3）
       onGenerateRoute: (settings) {
         switch (settings.name) {
           case '/':
@@ -35,8 +50,7 @@ class MyApp extends StatelessWidget {
             final videos = args['videos'] as List<LocalVideoModel>;
             final index = args['index'] as int;
             return MaterialPageRoute(
-              builder: (_) =>
-                  VideoPlayPage(videos: videos, initialIndex: index),
+              builder: (_) => VideoPlayPage(videos: videos, initialIndex: index),
             );
           default:
             return MaterialPageRoute(builder: (_) => const HomePage());

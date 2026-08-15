@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.7.0+9
+version: 1.8.0+10
 
 environment:
   sdk: ^3.12.2
@@ -33,11 +33,15 @@ dependencies:
 
   # 以下为本应用固定选型（规范 G6），严禁替换/新增
   cupertino_icons: ^1.0.8
-  chewie: ^1.8.5                # 视频播放封装（与 video_player 配套）
-  video_player: ^2.9.0         # 视频播放内核
+  chewie: ^1.8.5                # 视频播放封装（与 video_player 配套，仅作静音画面）
+  video_player: ^2.9.0         # 视频画面渲染内核
   video_thumbnail: ^0.5.3      # 本地缩略图生成
-  permission_handler: ^13.0.1  # 存储权限请求
-  wakelock_plus: ^1.2.0        # 控制屏幕常亮/息屏（后台播放时允许息屏）
+  permission_handler: ^13.0.1  # 存储/通知权限请求
+  wakelock_plus: ^1.2.0        # 前台观看时保持屏幕常亮（后台时释放，允许息屏）
+  # 后台/息屏续播引擎：audio_service 提供独立于 Activity 的 Android 媒体服务，
+  # just_audio 在其内部播放音频轨道，息屏/切后台/锁屏均不中断（华为等机型亦尊重）。
+  audio_service: ^0.18.0
+  just_audio: ^0.9.0
   path_provider: ^2.1.5        # 应用私有缓存目录（规范 3.3 引用 getApplicationCacheDirectory）
   path: ^1.9.0                 # 路径解析工具（扫描工具使用 p.basename/p.join/p.extension）
   file_picker: ^12.0.0         # 选择文件夹（用户指定视频目录，避免全盘遍历）
