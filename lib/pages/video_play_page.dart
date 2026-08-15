@@ -103,7 +103,7 @@ class VideoPlayItem extends StatefulWidget {
   State<VideoPlayItem> createState() => _VideoPlayItemState();
 }
 
-class _VideoPlayItemState extends State<VideoPlayItem> {
+class _VideoPlayItemState extends State<VideoPlayItem> with WidgetsBindingObserver {
   late VideoPlayerController _vpc;
   ChewieController? _chewieController;
   bool _initialized = false;
@@ -115,6 +115,7 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // 监听前后台切换（后台播放）
     _vpc = VideoPlayerController.file(File(widget.model.filePath));
     _vpc.addListener(_onVideoChanged);
     _vpc.initialize().then((_) {
@@ -157,9 +158,132 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
     });
   }
 
+  // ===== 定时关闭（睡眠定时） =====
+  /// 选定的定时时长（分钟），null 表示未开启
+  int? _sleepMinutes;
+  int _sleepRemaining = 0; // 剩余秒数
+  Timer? _sleepTimer;
+
+  String _fmtSleep(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildTimerButton() {
+    final active = _sleepMinutes != null;
+    return TextButton.icon(
+      onPressed: _pickSleepTimer,
+      icon: Icon(Icons.timer, color: active ? Colors.amber : Colors.white, size: 20),
+      label: Text(
+        active ? _fmtSleep(_sleepRemaining) : '定时',
+        style: TextStyle(color: active ? Colors.amber : Colors.white, fontSize: 12),
+      ),
+    );
+  }
+
+  Future<void> _pickSleepTimer() async {
+    final choice = await showDialog<int?>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('定时关闭（到时自动停止）', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.grey[900],
+        children: [
+          SimpleDialogOption(
+            child: const Text('关闭', style: TextStyle(color: Colors.white)),
+            onPressed: () => Navigator.pop(context, null),
+          ),
+          for (final m in [15, 30, 45, 60, 75, 90, 105, 120])
+            SimpleDialogOption(
+              child: Text('$m 分钟', style: const TextStyle(color: Colors.white)),
+              onPressed: () => Navigator.pop(context, m),
+            ),
+        ],
+      ),
+    );
+    if (choice == null && _sleepMinutes == null) return;
+    _setSleepTimer(choice);
+  }
+
+  void _setSleepTimer(int? minutes) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (minutes == null) {
+      _sleepMinutes = null;
+      _sleepRemaining = 0;
+    } else {
+      _sleepMinutes = minutes;
+      _sleepRemaining = minutes * 60;
+      _sleepTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        _sleepRemaining -= 1;
+        if (_sleepRemaining <= 0) {
+          t.cancel();
+          _sleepTimer = null;
+          _sleepMinutes = null;
+          _sleepRemaining = 0;
+          if (_vpc.value.isPlaying) {
+            _vpc.pause();
+            _isPlaying = false;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('已到设定时间，已停止播放'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        if (mounted) setState(() {});
+      });
+    }
+    setState(() {});
+  }
+
+  // ===== 后台播放 =====
+  bool _backgroundPlay = false;
+
+  Widget _buildBackgroundButton() {
+    return TextButton.icon(
+      onPressed: _toggleBackground,
+      icon: Icon(
+        _backgroundPlay ? Icons.headset : Icons.headset_off,
+        color: _backgroundPlay ? Colors.amber : Colors.white,
+        size: 20,
+      ),
+      label: Text(
+        _backgroundPlay ? '后台开' : '后台',
+        style: TextStyle(color: _backgroundPlay ? Colors.amber : Colors.white, fontSize: 12),
+      ),
+    );
+  }
+
+  void _toggleBackground() {
+    setState(() => _backgroundPlay = !_backgroundPlay);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 后台播放关闭：切后台/锁屏则暂停，避免离开后继续出声
+    // 后台播放开启：不暂停，音频在后台/锁屏继续（Android ExoPlayer 默认行为）
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      if (!_backgroundPlay && _vpc.value.isPlaying) {
+        _vpc.pause();
+        _isPlaying = false;
+        if (mounted) setState(() {});
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      if (mounted) setState(() => _isPlaying = _vpc.value.isPlaying);
+    }
+  }
+
   @override
   void dispose() {
     _autoHideTimer?.cancel();
+    _sleepTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this); // 移除前后台监听
     _vpc.removeListener(_onVideoChanged);
     _chewieController?.dispose();
     _vpc.dispose(); // 切换/离开即销毁，释放内存（任务 5.3.2 / 任务 7 P2）
@@ -230,19 +354,26 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
             onPressed: () => Navigator.of(context).pop(), // 返回首页（pop，不堆叠）
           ),
         ),
-        // 右上角横屏切换按钮
+        // 顶部右侧：定时关闭 / 后台播放 / 横屏切换（均置于播放页顶部）
         Positioned(
           top: 16,
           right: 8,
-          child: ValueListenableBuilder<bool>(
-            valueListenable: widget.landscape,
-            builder: (_, isLandscape, _) => IconButton(
-              icon: Icon(
-                isLandscape ? Icons.stay_current_portrait : Icons.stay_current_landscape,
-                color: Colors.white,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildTimerButton(),
+              _buildBackgroundButton(),
+              ValueListenableBuilder<bool>(
+                valueListenable: widget.landscape,
+                builder: (_, isLandscape, _) => IconButton(
+                  icon: Icon(
+                    isLandscape ? Icons.stay_current_portrait : Icons.stay_current_landscape,
+                    color: Colors.white,
+                  ),
+                  onPressed: widget.onToggleOrientation,
+                ),
               ),
-              onPressed: widget.onToggleOrientation,
-            ),
+            ],
           ),
         ),
         // 中央播放/暂停
