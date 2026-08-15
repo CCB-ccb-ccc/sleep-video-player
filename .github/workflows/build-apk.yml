@@ -51,11 +51,25 @@ jobs:
             echo "video_thumbnail build.gradle not found, skip"
           fi
 
-      - name: Build debug APK
-        run: flutter build apk --debug
+      # 从 GitHub Secret 解码稳定的自签名密钥（PKCS12），生成 android/key.properties 供 Gradle 签名
+      - name: Prepare signing keystore (from GitHub Secret)
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |
+          echo "$RELEASE_KEYSTORE" | base64 -d > "$HOME/release.p12"
+          {
+            echo "storeFile=$HOME/release.p12"
+            echo "storePassword=android"
+            echo "keyAlias=androidkey"
+            echo "keyPassword=android"
+          } > android/key.properties
+          echo "key.properties written"
+
+      - name: Build release APK
+        run: flutter build apk --release
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

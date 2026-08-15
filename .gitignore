@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# 签名密钥配置（由 CI 从 Secret 生成，绝不入库）
+/android/key.properties
+
+# 签名密钥配置（由 CI 从 Secret 生成，绝不入库）
+/android/key.properties
