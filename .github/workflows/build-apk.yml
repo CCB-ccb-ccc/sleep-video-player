@@ -24,9 +24,14 @@ jobs:
           channel: 'stable'
 
       # AGP 9.0.1 + permission_handler_android 14 需要 compileSdk/targetSdk 37；
-      # 裸写 platforms;android-37 因存在多个修订版会装不上，故指定稳定版 37.1
+      # 裸写 platforms;android-37 因存在多个修订版会装不上，故指定稳定版 37.1。
+      # 注意：ubuntu-24.04 runner 未将 sdkmanager 加入 PATH，需按全路径定位。
       - name: Install Android SDK platform 37
-        run: yes | sdkmanager "platforms;android-37.1"
+        run: |
+          SDK_DIR="/usr/local/lib/android/sdk"
+          SM=$(ls "$SDK_DIR"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          if [ -z "$SM" ]; then echo "sdkmanager not found"; exit 1; fi
+          yes | "$SM" "platforms;android-37.1"
 
       - name: Flutter pub get
         run: flutter pub get
