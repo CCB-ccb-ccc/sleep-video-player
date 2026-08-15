@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
@@ -5,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import '../models/local_video_model.dart';
 
-/// 上下滑动短视频播放页（任务 5）
+/// 上下滑动短视频播放页（任务 5 / 改造：自动隐藏面板 + 横屏按钮）
 class VideoPlayPage extends StatefulWidget {
   final List<LocalVideoModel> videos;
   final int initialIndex;
@@ -22,6 +23,8 @@ class VideoPlayPage extends StatefulWidget {
 
 class _VideoPlayPageState extends State<VideoPlayPage> {
   late PageController _pageController;
+  // 横屏状态在页面级统一管理：所有视频项共享，离开页面复位竖屏
+  final ValueNotifier<bool> _landscape = ValueNotifier<bool>(false);
 
   @override
   void initState() {
@@ -31,11 +34,28 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     _pageController = PageController(initialPage: widget.initialIndex);
   }
 
+  /// 切换横/竖屏
+  void _toggleOrientation() {
+    _landscape.value = !_landscape.value;
+    if (_landscape.value) {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+    } else {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]);
+    }
+  }
+
   @override
   void dispose() {
     _pageController.dispose();
-    // 离开页面恢复系统 UI（任务 5.1.1）
+    // 离开页面：复位竖屏并恢复系统 UI（任务 5.1.1）
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _landscape.dispose();
     super.dispose();
   }
 
@@ -54,7 +74,11 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
           itemCount: widget.videos.length,
           itemBuilder: (context, index) {
             // 懒加载：仅构建当前及相邻页面（任务 7 P1）
-            return VideoPlayItem(model: widget.videos[index]);
+            return VideoPlayItem(
+              model: widget.videos[index],
+              landscape: _landscape,
+              onToggleOrientation: _toggleOrientation,
+            );
           },
         ),
       ),
@@ -65,7 +89,15 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
 /// 单个视频播放项（自动播放、切走销毁，任务 5.3）
 class VideoPlayItem extends StatefulWidget {
   final LocalVideoModel model;
-  const VideoPlayItem({required this.model, super.key});
+  final ValueNotifier<bool> landscape;
+  final VoidCallback onToggleOrientation;
+
+  const VideoPlayItem({
+    required this.model,
+    required this.landscape,
+    required this.onToggleOrientation,
+    super.key,
+  });
 
   @override
   State<VideoPlayItem> createState() => _VideoPlayItemState();
@@ -77,6 +109,7 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
   bool _initialized = false;
   bool _showControls = true;
   bool _isPlaying = true;
+  Timer? _autoHideTimer;
 
   @override
   void initState() {
@@ -96,10 +129,14 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
             : 16 / 9,
       );
       _vpc.play(); // 默认自动播放（任务 5.3.3）
-      setState(() {
-        _initialized = true;
-        _isPlaying = true;
-      });
+      if (mounted) {
+        setState(() {
+          _initialized = true;
+          _isPlaying = true;
+        });
+        // 进入播放后控制面板自动隐藏（不再需要再点一下才消）
+        _scheduleAutoHide();
+      }
     }).catchError((_) {
       if (mounted) setState(() => _initialized = true);
     });
@@ -110,23 +147,43 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
     if (mounted && _showControls) setState(() {});
   }
 
+  /// 播放中延时自动隐藏控制面板（2.5 秒）
+  void _scheduleAutoHide() {
+    _autoHideTimer?.cancel();
+    _autoHideTimer = Timer(const Duration(milliseconds: 2500), () {
+      if (mounted && _isPlaying) {
+        setState(() => _showControls = false);
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _autoHideTimer?.cancel();
     _vpc.removeListener(_onVideoChanged);
     _chewieController?.dispose();
     _vpc.dispose(); // 切换/离开即销毁，释放内存（任务 5.3.2 / 任务 7 P2）
     super.dispose();
   }
 
-  void _toggleControls() => setState(() => _showControls = !_showControls);
+  void _toggleControls() {
+    setState(() => _showControls = !_showControls);
+    if (_showControls && _isPlaying) {
+      _scheduleAutoHide(); // 重新显示后重新计时隐藏
+    } else {
+      _autoHideTimer?.cancel();
+    }
+  }
 
   void _togglePlay() {
     if (_vpc.value.isPlaying) {
       _vpc.pause();
       _isPlaying = false;
+      _autoHideTimer?.cancel(); // 暂停时保持面板可见
     } else {
       _vpc.play();
       _isPlaying = true;
+      _scheduleAutoHide();
     }
     setState(() {});
   }
@@ -171,6 +228,21 @@ class _VideoPlayItemState extends State<VideoPlayItem> {
           child: IconButton(
             icon: const Icon(Icons.arrow_back, color: Colors.white),
             onPressed: () => Navigator.of(context).pop(), // 返回首页（pop，不堆叠）
+          ),
+        ),
+        // 右上角横屏切换按钮
+        Positioned(
+          top: 16,
+          right: 8,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: widget.landscape,
+            builder: (_, isLandscape, _) => IconButton(
+              icon: Icon(
+                isLandscape ? Icons.stay_current_portrait : Icons.stay_current_landscape,
+                color: Colors.white,
+              ),
+              onPressed: widget.onToggleOrientation,
+            ),
           ),
         ),
         // 中央播放/暂停

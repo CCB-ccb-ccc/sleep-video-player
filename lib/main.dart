@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'models/local_video_model.dart';
-import 'pages/video_list_page.dart';
+import 'pages/home_page.dart';
 import 'pages/video_play_page.dart';
 
 void main() {
@@ -29,8 +29,7 @@ class MyApp extends StatelessWidget {
       onGenerateRoute: (settings) {
         switch (settings.name) {
           case '/':
-            return MaterialPageRoute(
-                builder: (_) => const VideoListPage());
+            return MaterialPageRoute(builder: (_) => const HomePage());
           case '/play':
             final args = settings.arguments as Map<String, dynamic>;
             final videos = args['videos'] as List<LocalVideoModel>;
@@ -40,8 +39,7 @@ class MyApp extends StatelessWidget {
                   VideoPlayPage(videos: videos, initialIndex: index),
             );
           default:
-            return MaterialPageRoute(
-                builder: (_) => const VideoListPage());
+            return MaterialPageRoute(builder: (_) => const HomePage());
         }
       },
     );
