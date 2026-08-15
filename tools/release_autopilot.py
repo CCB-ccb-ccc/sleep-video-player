@@ -32,9 +32,24 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import zipfile
 
 API = "https://api.github.com"
+
+
+class NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """跨域重定向（GitHub API -> Azure 存储 SAS URL）时不要转发 Authorization 头，
+    否则存储服务会返回 403。同域重定向仍保留。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            src_host = urllib.parse.urlparse(req.full_url).netloc
+            dst_host = urllib.parse.urlparse(newurl).netloc
+            if dst_host != src_host:
+                new_req.remove_header("Authorization")
+        return new_req
 
 
 def gh_get(path, token):
@@ -186,13 +201,13 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     zip_path = os.path.join(args.out_dir, "_release_artifact.zip")
-    req = urllib.request.Request(
-        f"{API}/repos/{owner}/{repo}/actions/artifacts/{art['id']}/zip"
-    )
+    url = f"{API}/repos/{owner}/{repo}/actions/artifacts/{art['id']}/zip"
+    req = urllib.request.Request(url)
     req.add_header("Authorization", "token " + token)
     req.add_header("Accept", "application/vnd.github+json")
     print("[download] 开始下载构件 zip ...")
-    with urllib.request.urlopen(req, timeout=600) as r, open(zip_path, "wb") as f:
+    opener = urllib.request.build_opener(NoAuthRedirect())
+    with opener.open(req, timeout=600) as r, open(zip_path, "wb") as f:
         while True:
             buf = r.read(1024 * 1024)
             if not buf:
