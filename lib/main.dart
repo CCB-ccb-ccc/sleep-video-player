@@ -11,7 +11,8 @@ Future<void> main() async {
 
   // 初始化音频服务：启动真正的 Android 媒体服务（独立于 Activity），
   // 这是息屏 / 后台能稳定续播的关键引擎。
-  await AudioService.init(
+  // audio_service 0.18 起需持有 init 返回的 handler（已无 AudioService.handler 静态成员）。
+  globalAudioHandler = await AudioService.init(
     builder: () => AudioPlayerHandler(),
     config: AudioServiceConfig(
       androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
@@ -19,7 +20,7 @@ Future<void> main() async {
       androidNotificationOngoing: true,
       androidShowNotificationBadge: false,
     ),
-  );
+  ) as AudioPlayerHandler;
 
   runApp(const MyApp());
 }

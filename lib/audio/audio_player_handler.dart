@@ -1,6 +1,11 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 
+/// 全局音频服务处理器实例。
+/// 说明：audio_service 0.18 起移除了 `AudioService.handler` 静态成员，
+/// 改为由 `AudioService.init(...)` 的返回值持有，这里用全局变量中转供播放页访问。
+AudioPlayerHandler? globalAudioHandler;
+
 /// 音频服务处理器：用 just_audio 播放“同一视频文件”的音频轨道。
 ///
 /// 关键：它运行在 audio_service 提供的 Android 媒体服务（MediaBrowserService）中，
@@ -25,7 +30,6 @@ class AudioPlayerHandler extends BaseAudioHandler with SeekHandler {
             MediaAction.seekForward,
             MediaAction.seekBackward,
           },
-          androidCompactActions: const [0, 1],
           processingState: const {
             ProcessingState.idle: AudioProcessingState.idle,
             ProcessingState.loading: AudioProcessingState.loading,

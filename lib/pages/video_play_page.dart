@@ -158,8 +158,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 音频服务在 main 中已初始化，这里取其实例（单例）
-    _handler = AudioService.handler as AudioPlayerHandler?;
+    // 音频服务在 main 中已初始化，这里取其实例（全局单例）
+    _handler = globalAudioHandler;
 
     _vpc = VideoPlayerController.file(File(widget.model.filePath));
     _vpc.addListener(_onVideoChanged);
