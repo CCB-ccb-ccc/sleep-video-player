@@ -36,12 +36,20 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      # video_thumbnail 最新版(0.5.6)的 android/build.gradle 仍使用 Gradle 7+ 已移除的
-      # jcenter()，会导致 evaluation 失败。将其替换为 mavenCentral()（包本身与 API 不变）。
-      - name: Patch video_thumbnail (jcenter removed in Gradle 7+)
+      # video_thumbnail 最新版(0.5.6)的 android/build.gradle：
+      # 1) 仍使用 Gradle 7+ 已移除的 jcenter() → 替换为 mavenCentral()；
+      # 2) compileSdkVersion 硬编码为 33，而其依赖(androidx.fragment/window 等)要求 ≥34
+      #    → 改为 37（与 App 一致）。包本身与 API 不变，仅修正过时的构建配置。
+      - name: Patch video_thumbnail (jcenter removed; compileSdk 33 too low)
         run: |
           F=$(ls "$HOME"/.pub-cache/hosted/pub.dev/video_thumbnail-*/android/build.gradle 2>/dev/null | head -1)
-          if [ -n "$F" ]; then sed -i 's/jcenter()/mavenCentral()/g' "$F"; echo "patched $F"; else echo "video_thumbnail build.gradle not found, skip"; fi
+          if [ -n "$F" ]; then
+            sed -i -E 's/jcenter\(\)/mavenCentral()/g; s/compileSdkVersion[[:space:]]*33/compileSdkVersion 37/g' "$F"
+            echo "patched $F"
+            grep -nE "jcenter|compileSdkVersion" "$F" || true
+          else
+            echo "video_thumbnail build.gradle not found, skip"
+          fi
 
       - name: Build debug APK
         run: flutter build apk --debug
