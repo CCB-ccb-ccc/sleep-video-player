@@ -36,6 +36,13 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
+      # video_thumbnail 最新版(0.5.6)的 android/build.gradle 仍使用 Gradle 7+ 已移除的
+      # jcenter()，会导致 evaluation 失败。将其替换为 mavenCentral()（包本身与 API 不变）。
+      - name: Patch video_thumbnail (jcenter removed in Gradle 7+)
+        run: |
+          F=$(ls "$HOME"/.pub-cache/hosted/pub.dev/video_thumbnail-*/android/build.gradle 2>/dev/null | head -1)
+          if [ -n "$F" ]; then sed -i 's/jcenter()/mavenCentral()/g' "$F"; echo "patched $F"; else echo "video_thumbnail build.gradle not found, skip"; fi
+
       - name: Build debug APK
         run: flutter build apk --debug
 
