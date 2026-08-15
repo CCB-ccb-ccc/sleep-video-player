@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- 媒体前台服务通知所需（Android 13+ 必须声明并获授权，否则媒体服务会被系统杀） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 音频服务（audio_service）后台媒体播放必须的前台服务权限。
+         Android 14(API 34)+ 缺少二者时 startForeground(mediaPlayback) 会抛 SecurityException 崩溃。
+         audio_service 0.18 的插件 manifest 不再自带声明，需由 App 补回。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <application
         android:label="助眠播放器"
         android:name="${applicationName}"
@@ -32,8 +37,20 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- 音频服务（audio_service）自带前台媒体服务，由插件 manifest 自动声明，
-             无需在此重复声明前台服务；其通知/锁屏媒体控制即为后台续播的载体。 -->
+        <!-- 音频服务（audio_service）的媒体前台服务组件。
+             audio_service 0.18 插件 manifest 为空、不自带声明，必须由 App 显式声明，
+             否则运行时绑定 AudioService 失败 → AudioService.init 抛错 → App 卡开屏。
+             foregroundServiceType=mediaPlayback 配合 FOREGROUND_SERVICE 权限，
+             满足 Android 14+ 后台媒体播放要求。 -->
+        <service
+            android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

@@ -6,23 +6,51 @@ import 'pages/home_page.dart';
 import 'pages/video_play_page.dart';
 
 Future<void> main() async {
-  // 必须在 AudioService.init 之前初始化 Flutter 绑定
+  // 必须在任何插件调用前初始化 Flutter 绑定
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 初始化音频服务：启动真正的 Android 媒体服务（独立于 Activity），
-  // 这是息屏 / 后台能稳定续播的关键引擎。
-  // audio_service 0.18 起需持有 init 返回的 handler（已无 AudioService.handler 静态成员）。
-  globalAudioHandler = await AudioService.init(
-    builder: () => AudioPlayerHandler(),
-    config: AudioServiceConfig(
-      androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
-      androidNotificationChannelName: '助眠播放器',
-      androidNotificationOngoing: true,
-      androidShowNotificationBadge: false,
-    ),
-  ) as AudioPlayerHandler;
+  // 全局错误兜底：任何 widget 抛错都显示可读错误页，而不是卡在原生开屏/黑屏。
+  ErrorWidget.builder = (details) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            '运行出错：${details.exception}\n\n请尝试重启应用。',
+            style: const TextStyle(color: Colors.white),
+          ),
+        ),
+      ),
+    );
+  };
 
+  // 关键修复（1.10.0）：先启动 UI，确保原生开屏（splash）一定被移除。
+  // 之前把 `AudioService.init` 放在 runApp 之前 await —— 一旦它抛错或挂起，
+  // runApp 永不执行 → App 永远卡在开屏。现改为 runApp 后立即异步初始化音频服务，
+  // 失败也仅降级为「前台 video_player 出声」，绝不阻塞启动。
   runApp(const MyApp());
+
+  _initAudioService();
+}
+
+/// 异步、非阻塞地初始化音频服务（独立于 Activity 的 Android 媒体服务）。
+/// 失败不影响 App 启动；播放页在 handler 为空时会降级用 video_player 出声（仅前台可用）。
+Future<void> _initAudioService() async {
+  try {
+    globalAudioHandler = await AudioService.init(
+      builder: () => AudioPlayerHandler(),
+      config: AudioServiceConfig(
+        androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
+        androidNotificationChannelName: '助眠播放器',
+        androidNotificationOngoing: true,
+        androidShowNotificationBadge: false,
+      ),
+    ) as AudioPlayerHandler;
+  } catch (e, st) {
+    globalAudioHandler = null;
+    debugPrint('AudioService.init 失败，降级为前台播放: $e\n$st');
+  }
 }
 
 /// 全局入口与主题
