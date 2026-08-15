@@ -75,23 +75,30 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     }
   }
 
-  /// 切换后台播放：开启则启动前台保活服务并允许息屏（音频继续）；
-  /// 关闭则恢复常亮并停止服务
+  /// 切换后台播放。
+  /// 关键修复：后台播放开启时必须保持 CPU 唤醒锁（PARTIAL_WAKE_LOCK）。
+  /// 该锁只保持 CPU 唤醒、不保持屏幕 —— 屏幕照样会熄（省电），
+  /// 但 CPU 不休眠才能让 ExoPlayer 持续解码，从而息屏/锁屏后声音继续。
+  /// 之前错误地 disable 了它，导致息屏后 CPU 睡眠、解码停止、声音戛然而止。
   void _setBackgroundPlay(bool on) {
     _backgroundPlay.value = on;
+    // 无论前后台，播放页都持有 CPU 唤醒锁；开关只控制前台服务启停。
+    WakelockPlus.enable().catchError((_) {});
     if (on) {
-      WakelockPlus.disable().catchError((_) {}); // 息屏/切后台时允许屏幕熄灭，声音继续
       _startBgService();
     } else {
-      WakelockPlus.enable().catchError((_) {}); // 恢复常亮（前台观看）
       _stopBgService();
     }
   }
 
   @override
   void dispose() {
-    _stopBgService();
-    WakelockPlus.enable().catchError((_) {}); // 离开播放页恢复默认常亮
+    // 后台播放仍开启时，不在此处停服务/释放唤醒锁（由用户关闭“后台”开关来终止）；
+    // 否则离开播放页会让 CPU 重新可休眠，息屏后音频又停。
+    if (!_backgroundPlay.value) {
+      _stopBgService();
+      WakelockPlus.disable().catchError((_) {});
+    }
     _pageController.dispose();
     // 离开页面：复位竖屏并恢复系统 UI（任务 5.1.1）
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
