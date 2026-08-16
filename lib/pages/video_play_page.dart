@@ -8,11 +8,13 @@ import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../audio/audio_player_handler.dart';
-import '../models/local_video_model.dart';
+import '../core/app_settings.dart';
+import '../core/video_name_store.dart';
 import '../debug/diag.dart';
+import '../models/local_video_model.dart';
 
 /// 播放页容器：底部竖向滑动切换视频（抖音式）。
-/// 页面级统一管理：横屏、后台播放开关、当前激活序号。
+/// 页面级统一管理：横屏、当前激活序号、全局后台开关（来自设置）。
 class VideoPlayPage extends StatefulWidget {
   final List<LocalVideoModel> videos;
   final int initialIndex;
@@ -31,8 +33,6 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
   late PageController _pageController;
   // 横屏状态在页面级统一管理：所有视频项共享，离开页面复位竖屏
   final ValueNotifier<bool> _landscape = ValueNotifier<bool>(false);
-  // 后台播放开关（页面级，所有视频项共享）
-  final ValueNotifier<bool> _backgroundPlay = ValueNotifier<bool>(false);
   // 当前激活（可见）的视频序号：只有激活项驱动音频服务，避免相邻预载项抢占音频
   final ValueNotifier<int> _activeIndex = ValueNotifier<int>(0);
 
@@ -61,13 +61,6 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     }
   }
 
-  /// 切换后台播放：仅改变开关值。
-  /// 真正的“息屏续播”由音频服务（audio_service）保障，不再依赖自定义前台服务/唤醒锁
-  /// —— 那是之前 4 个版本在华为上失败的根因（video_player 绑定 Activity，息屏即被回收）。
-  void _setBackgroundPlay(bool on) {
-    _backgroundPlay.value = on;
-  }
-
   @override
   void dispose() {
     WakelockPlus.disable().catchError((_) {});
@@ -75,8 +68,11 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _landscape.dispose();
-    _backgroundPlay.dispose();
     _activeIndex.dispose();
+    // 需求1：离开播放页（退回首页）则停止音频与视频，不再继续播放。
+    // 注意：退出整个 App 时由 main/app 生命周期决定；这里仅“仍停留在 App 内-
+    // 播放页首页”情况下停止播放，符合“退出到播放页首页、音频还在播放需改正”。
+    globalAudioHandler.value?.stop();
     super.dispose();
   }
 
@@ -97,11 +93,11 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
             return VideoPlayItem(
               model: widget.videos[index],
               index: index,
+              total: widget.videos.length,
               activeIndex: _activeIndex,
               landscape: _landscape,
-              backgroundPlay: _backgroundPlay,
+              pageController: _pageController,
               onToggleOrientation: _toggleOrientation,
-              onToggleBackground: _setBackgroundPlay,
             );
           },
         ),
@@ -113,25 +109,24 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
 /// 单个视频播放项。
 ///
 /// 设计：video_player 仅渲染“静音画面”，声音统一由音频服务（just_audio）播放。
-/// 这样：前台看得到视频画面、听得到声音；息屏/切后台时，Activity 被回收也不影响音频服务，
-/// 声音由媒体服务继续播放（系统级通道，华为等激进省电机型也会尊重）。
+/// 后台播放开关来自全局设置（AppSettings），用户一旦在“设置页”开启即持久生效。
 class VideoPlayItem extends StatefulWidget {
   final LocalVideoModel model;
   final int index;
+  final int total;
   final ValueNotifier<int> activeIndex;
   final ValueNotifier<bool> landscape;
-  final ValueNotifier<bool> backgroundPlay;
+  final PageController pageController;
   final VoidCallback onToggleOrientation;
-  final ValueChanged<bool> onToggleBackground;
 
   const VideoPlayItem({
     required this.model,
     required this.index,
+    required this.total,
     required this.activeIndex,
     required this.landscape,
-    required this.backgroundPlay,
+    required this.pageController,
     required this.onToggleOrientation,
-    required this.onToggleBackground,
     super.key,
   });
 
@@ -145,7 +140,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   ChewieController? _chewieController;
   bool _initialized = false;
   bool _audioReady = false; // 音频服务是否已加载本文件
-  // 进入播放默认完全隐藏控制面板，用户点击屏幕才临时显示
+  // 自定义控制面板：仅由「设置」按钮呼出，默认隐藏
   bool _showControls = false;
   bool _isPlaying = true;
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
@@ -153,6 +148,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   Timer? _sleepTimer;
   Timer? _syncTimer; // 静音画面与音频进度对齐
   AudioPlayerHandler? _handler;
+  String _displayName = '';
 
   bool get _isActive => widget.activeIndex.value == widget.index;
 
@@ -160,11 +156,11 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 音频服务在 main 中“异步”初始化（为防开屏卡死），这里先取当前值；
-    // 若尚未就绪，globalAudioHandler 的 listener 会在其就绪后自动接管，
-    // 避免“启动顺序竞争”导致一直拿不到 handler 而彻底没声音。
     _handler = globalAudioHandler.value;
     globalAudioHandler.addListener(_onHandlerReady);
+
+    // 视频显示名称（自定义或默认文件名）
+    _loadName();
 
     _vpc = VideoPlayerController.file(File(widget.model.filePath));
     _vpc.addListener(_onVideoChanged);
@@ -181,18 +177,23 @@ class _VideoPlayItemState extends State<VideoPlayItem>
             : 16 / 9,
       );
       if (mounted) setState(() => _initialized = true);
-      // 若本项已是激活项，则开始播放（音频 + 静音视频）
       if (_isActive) _activate();
     }).catchError((_) {
       if (mounted) setState(() => _initialized = true);
     });
 
     widget.activeIndex.addListener(_onActiveChanged);
-        // 每 1000ms 把静音画面 seek 到音频进度，保持画面与声音同步。
-        // 频率从 500ms 降到 1000ms、容差从 400ms 提到 1000ms，
-        // 减少荣耀/华为机型因频繁 seek 导致的卡顿。
-        _syncTimer = Timer.periodic(
-            const Duration(milliseconds: 1000), (_) => _syncVideo());
+    // 每 1000ms 把静音画面 seek 到音频进度，保持画面与声音同步。
+    _syncTimer = Timer.periodic(
+        const Duration(milliseconds: 1000), (_) => _syncVideo());
+
+    // 监听音频播放完成：顺序播放 / 单集循环
+    _handler?.player.processingStateStream.listen(_onAudioComplete);
+  }
+
+  Future<void> _loadName() async {
+    final name = await VideoNameStore.getName(widget.model.filePath);
+    if (mounted) setState(() => _displayName = name);
   }
 
   void _onActiveChanged() {
@@ -208,18 +209,62 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void _onHandlerReady() {
     final h = globalAudioHandler.value;
     _handler = h;
+    h?.player.processingStateStream.listen(_onAudioComplete);
     if (h != null && _isActive && _initialized) {
       _activate();
     }
   }
 
+  /// 音频播放完成事件：根据播放模式决定下一步。
+  void _onAudioComplete(ProcessingState state) {
+    if (state != ProcessingState.completed) return;
+    if (!_isActive || !_audioReady) return;
+    diag('audio completed 播放模式=${AppSettings.instance.playMode.name}');
+    switch (AppSettings.instance.playMode) {
+      case PlayMode.sequence:
+        _playNext();
+        break;
+      case PlayMode.loopOne:
+        _handler?.player.seek(Duration.zero);
+        _handler?.player.play();
+        _vpc.seekTo(Duration.zero);
+        _vpc.play();
+        break;
+      case PlayMode.manual:
+      default:
+        // 手动模式：停止（视频也停下）
+        if (_vpc.value.isInitialized) _vpc.pause();
+        break;
+    }
+  }
+
+  /// 顺序播放：跳到下一集（若已是最后一集则停止）。
+  void _playNext() {
+    final next = widget.index + 1;
+    if (next >= widget.total) {
+      // 已是最后一集
+      _pauseAll();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已是最后一个视频')),
+        );
+      }
+      return;
+    }
+    widget.activeIndex.value = next;
+    // 由外层 PageController 驱动翻页
+    widget.pageController.animateToPage(
+      next,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+    // 翻页后新一集成为激活项，_onActiveChanged 会自动激活并播放。
+  }
+
   /// 成为激活项：加载音频到音频服务并开始播放（视频静音同步）。
-  /// 若音频服务尚未就绪/失败：退化用视频播放器自身出声（仅前台可用），
-  /// 绝不再因为拿不到 handler 就“彻底静音”。
   Future<void> _activate() async {
     if (!_initialized) return;
     diag('activate: isActive=$_isActive');
-    // 每次都重新读取最新 handler（它可能在 init 完成后才就绪）
     final handler = globalAudioHandler.value;
     _handler = handler;
     diag('activate: handler=${handler?.runtimeType ?? 'null'}');
@@ -242,12 +287,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       _audioReady = true;
       _vpc.setVolume(0); // 正常：声音走音频服务
       diag('activate: 音频服务加载成功, 走音频路径');
-      // 把音频起点对齐到视频当前进度，避免声音从头开始/画面被 seek 回 0 造成卡顿
       if (_vpc.value.isInitialized) {
         await handler.player.seek(_vpc.value.position);
       }
     } catch (_) {
-      // 兜底：音频服务加载失败，则直接用视频播放器出声（仅前台可用）
       diag('activate: 音频加载失败 -> 退化 video 出声');
       _audioReady = false;
       _vpc.setVolume(1);
@@ -260,7 +303,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (mounted) {
       setState(() {
         _isPlaying = _playbackIntended;
-        _showControls = false; // 进入即隐藏，不闪现控制面板
+        _showControls = false;
       });
     }
   }
@@ -274,7 +317,6 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (mounted && _showControls) setState(() {});
   }
 
-  /// 当前播放位置/时长：优先取音频服务（正常路径），兜底取 video_player。
   Duration _curPos() {
     if (_audioReady && _handler != null) return _handler!.player.position;
     return _vpc.value.isInitialized ? _vpc.value.position : Duration.zero;
@@ -292,13 +334,12 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (_vpc.value.isInitialized) _vpc.seekTo(d);
   }
 
-  /// 静音画面跟随音频进度（允许 400ms 偏差，避免频繁 seek）
+  /// 静音画面跟随音频进度（容差 1000ms，减少频繁 seek 卡顿）
   void _syncVideo() {
     if (!_isActive || !_initialized || _handler == null) return;
     if (!_handler!.player.playing) return;
     final ap = _handler!.player.position;
     final vp = _vpc.value.position;
-    // 容差提到 1000ms：减少低端机/荣耀机型频繁 seek 导致的卡顿
     if ((ap - vp).abs() > const Duration(milliseconds: 1000)) {
       _vpc.seekTo(ap);
     }
@@ -389,43 +430,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     setState(() {});
   }
 
-  // ===== 后台播放按钮（读取页面级 notifier） =====
-  Widget _buildBackgroundButton() {
-    return ValueListenableBuilder<bool>(
-      valueListenable: widget.backgroundPlay,
-      builder: (_, bg, _) => TextButton.icon(
-        onPressed: () {
-          final willOn = !bg;
-          widget.onToggleBackground(willOn);
-          if (willOn && mounted) {
-            diag('后台播放开关=开');
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                duration: Duration(seconds: 6),
-                content: Text(
-                  '已开启后台播放。若息屏仍断声，请点右上角「续航」把本App设为“电池不受限制”，'
-                  '荣耀/华为会杀掉未设白名单的后台媒体服务。',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-            );
-          }
-        },
-        icon: Icon(
-          bg ? Icons.headset : Icons.headset_off,
-          color: bg ? Colors.amber : Colors.white,
-          size: 20,
-        ),
-        label: Text(
-          bg ? '后台开' : '后台',
-          style: TextStyle(color: bg ? Colors.amber : Colors.white, fontSize: 12),
-        ),
-      ),
-    );
-  }
-
-  /// 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制 / 受保护应用”，
-  /// 这是荣耀/华为息屏后不杀后台媒体的决定性步骤。
+  /// 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制 / 受保护应用”。
   Future<void> _openBatterySettings() async {
     final intent = AndroidIntent(
       action: 'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
@@ -435,7 +440,6 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       await intent.launch();
       diag('openBatterySettings: 跳转电池优化豁免页');
     } catch (e) {
-      // 部分机型无此 action，退回应用详情页
       final intent2 = AndroidIntent(
         action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
         data: 'package:com.sleep.localvideoplayer',
@@ -449,44 +453,204 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     }
   }
 
-  /// 诊断状态浮层：把后台播放链路关键事件打出来，方便用户截图定位“息屏断声”根因。
-  Widget _buildStatusButton() {
-    return TextButton.icon(
-      onPressed: () => showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
-          backgroundColor: Colors.grey[900],
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 340,
-            child: SingleChildScrollView(
-              child: Text(
-                kDiagLog.isEmpty ? '（暂无记录）' : kDiagLog.join('\n'),
-                style: const TextStyle(
-                    color: Colors.white70, fontSize: 11, fontFamily: 'monospace'),
-              ),
+  /// 诊断状态浮层
+  void _showStatusDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.grey[900],
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 340,
+          child: SingleChildScrollView(
+            child: Text(
+              kDiagLog.isEmpty ? '（暂无记录）' : kDiagLog.join('\n'),
+              style: const TextStyle(
+                  color: Colors.white70, fontSize: 11, fontFamily: 'monospace'),
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('关闭', style: TextStyle(color: Colors.white)),
-            ),
-          ],
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭', style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
+    );
+  }
+
+  Widget _buildStatusButton() {
+    return TextButton.icon(
+      onPressed: _showStatusDialog,
       icon: const Icon(Icons.bug_report, color: Colors.white, size: 20),
       label: const Text('状态', style: TextStyle(color: Colors.white, fontSize: 12)),
     );
   }
 
   /// 续航设置按钮：一键跳转电池白名单设置。
-  Widget _buildSettingsButton() {
+  Widget _buildBatteryButton() {
     return TextButton.icon(
       onPressed: _openBatterySettings,
       icon: const Icon(Icons.battery_charging_full, color: Colors.white, size: 20),
       label: const Text('续航', style: TextStyle(color: Colors.white, fontSize: 12)),
+    );
+  }
+
+  /// 播放模式选择（顺序/单集/手动）
+  Widget _buildPlayModeButton() {
+    return ValueListenableBuilder<PlayMode>(
+      valueListenable: AppSettings.instance.playModeNotifier,
+      builder: (_, mode, _) => TextButton.icon(
+        onPressed: _pickPlayMode,
+        icon: Icon(
+          mode == PlayMode.sequence
+              ? Icons.playlist_play
+              : mode == PlayMode.loopOne
+                  ? Icons.repeat_one
+                  : Icons.play_circle_outline,
+          color: Colors.white,
+          size: 20,
+        ),
+        label: Text(
+          mode.label,
+          style: const TextStyle(color: Colors.white, fontSize: 12),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickPlayMode() async {
+    final choice = await showDialog<PlayMode>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('播放模式', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.grey[900],
+        children: const [
+          SimpleDialogOption(
+            child: Text('手动播放（看完不自动播）', style: TextStyle(color: Colors.white)),
+            onPressed: () => Navigator.pop(null, PlayMode.manual),
+          ),
+          SimpleDialogOption(
+            child: Text('顺序播放（自动播下一个）', style: TextStyle(color: Colors.white)),
+            onPressed: () => Navigator.pop(null, PlayMode.sequence),
+          ),
+          SimpleDialogOption(
+            child: Text('单集循环（重复看本集）', style: TextStyle(color: Colors.white)),
+            onPressed: () => Navigator.pop(null, PlayMode.loopOne),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    await AppSettings.instance.setPlayMode(choice);
+    if (choice != PlayMode.manual) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已切换为「${choice.label}」')),
+      );
+    }
+  }
+
+  /// 重命名当前视频（自定义名称，默认文件名）
+  Future<void> _renameCurrent() async {
+    final current = _displayName.isEmpty
+        ? VideoNameStore.defaultName(widget.model.filePath)
+        : _displayName;
+    final ctrl = TextEditingController(text: current);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('视频名称', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: '留空则使用文件名',
+            hintStyle: TextStyle(color: Colors.grey),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('确定', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (name == null) return;
+    await VideoNameStore.setName(widget.model.filePath, name);
+    setState(() => _displayName =
+        name.isEmpty ? VideoNameStore.defaultName(widget.model.filePath) : name);
+  }
+
+  /// 「设置」按钮：弹出设置窗口，集成定时/状态/续航/名称/播放模式。
+  Widget _buildSettingsButton() {
+    return IconButton(
+      icon: const Icon(Icons.settings, color: Colors.white),
+      tooltip: '设置',
+      onPressed: _openSettingsSheet,
+    );
+  }
+
+  void _openSettingsSheet() {
+    setState(() => _showControls = true);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.timer, color: Colors.white),
+              title: const Text('定时关闭', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _pickSleepTimer();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.playlist_play, color: Colors.white),
+              title: const Text('播放模式', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _pickPlayMode();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note, color: Colors.white),
+              title: const Text('视频名称', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _renameCurrent();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.bug_report, color: Colors.white),
+              title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _showStatusDialog();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.battery_charging_full, color: Colors.white),
+              title: const Text('续航白名单', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _openBatterySettings();
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -505,6 +669,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _playbackIntended = true;
   }
 
+  /// 需求5：单击屏幕 = 暂停/继续（不再作为“显示控制面板”的开关）。
   void _togglePlay() {
     if (_isPlaying) {
       _pauseAll();
@@ -520,16 +685,14 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final audioPlaying =
         _audioReady && _handler != null && _handler!.player.playing;
+    final bgEnabled = AppSettings.instance.backgroundPlay;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
-      diag('lifecycle=离开前台($state) 后台开关=${widget.backgroundPlay.value} '
+      diag('lifecycle=离开前台($state) 后台开关=$bgEnabled '
           'audioPlayingBefore=$audioPlaying');
-      // 离开前台：释放屏幕唤醒锁，允许息屏
       WakelockPlus.disable().catchError((_) {});
-      if (widget.backgroundPlay.value) {
-        // 后台播放开启：音频服务（媒体服务）继续出声；仅暂停本项视频解码省电。
-        // 某些机型息屏时会触发音频焦点丢失导致 just_audio 自动 pause，
-        // 这里显式 play() 一次确保音频继续（若已在播则无影响）。
+      if (bgEnabled) {
+        // 后台播放开启（来自全局设置）：音频服务继续；仅暂停视频解码省电。
         if (_audioReady && _handler != null) {
           _handler!.player.play();
           diag('lifecycle: 后台模式下离开前台，已确保音频继续播放');
@@ -541,11 +704,9 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       }
     } else if (state == AppLifecycleState.resumed) {
       diag('lifecycle=resumed 回前台 audioPlayingAfter=$audioPlaying');
-      // 回到前台：恢复常亮 + 视频画面
       WakelockPlus.enable().catchError((_) {});
-      if (widget.backgroundPlay.value) {
-        if (_vpc.value.isInitialized) _vpc.play(); // 静音视频继续显示
-        // 音频服务在后台模式一直播放，无需处理
+      if (bgEnabled) {
+        if (_vpc.value.isInitialized) _vpc.play();
       } else {
         if (_playbackIntended) {
           if (_audioReady && _handler != null) _handler!.player.play();
@@ -571,15 +732,6 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     super.dispose();
   }
 
-  void _toggleControls() {
-    setState(() => _showControls = !_showControls);
-    if (_showControls && _isPlaying) {
-      _scheduleAutoHide();
-    } else {
-      _autoHideTimer?.cancel();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     if (!_initialized || _chewieController == null) {
@@ -589,7 +741,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       );
     }
     return GestureDetector(
-      onTap: _toggleControls,
+      // 需求5：单击屏幕暂停/继续
+      onTap: _togglePlay,
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -597,13 +750,52 @@ class _VideoPlayItemState extends State<VideoPlayItem>
             color: Colors.black,
             child: Chewie(controller: _chewieController!),
           ),
+          // 视频名称：竖屏常显；横屏仅进度条（控制面板）显示时显示
+          _buildNameOverlay(),
+          // 「设置」按钮（右上角常显）
+          Positioned(
+            top: 16,
+            right: 8,
+            child: _buildSettingsButton(),
+          ),
           if (_showControls) _buildControls(),
         ],
       ),
     );
   }
 
-  /// 自定义控制面板（顶部按钮 + 中央播放/暂停 + 底部进度条）
+  /// 视频名称浮层（需求6）。
+  /// 竖屏常显；横屏仅进度条（控制面板）显示时显示。
+  /// 控制面板显示时左上角有返回按钮，名称下移避免遮挡。
+  Widget _buildNameOverlay() {
+    final showInLandscape = _landscape.value && _showControls;
+    final show = !_landscape.value || showInLandscape;
+    if (!show) return const SizedBox.shrink();
+    final top = _showControls ? 60.0 : 16.0;
+    return Positioned(
+      top: top,
+      left: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withAlpha(150),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        constraints: const BoxConstraints(maxWidth: 260),
+        child: Text(
+          _displayName.isEmpty
+              ? VideoNameStore.defaultName(widget.model.filePath)
+              : _displayName,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    );
+  }
+
+  /// 自定义控制面板（顶部返回 + 中央播放/暂停 + 底部进度条）。
+  /// 默认隐藏，由「设置」按钮呼出（_showControls=true）。
   Widget _buildControls() {
     final pos = _curPos();
     final dur = _curDur();
@@ -621,19 +813,19 @@ class _VideoPlayItemState extends State<VideoPlayItem>
             onPressed: () => Navigator.of(context).pop(),
           ),
         ),
-        // 顶部右侧：定时关闭 / 后台播放 / 横屏切换（均置于播放页顶部）
+        // 右上角：定时/状态/续航/横屏（设置按钮常显在 build 外层）
         Positioned(
           top: 16,
-          right: 8,
+          right: 56,
           child: Row(
             mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildTimerButton(),
-          _buildStatusButton(),
-          _buildBackgroundButton(),
-          _buildSettingsButton(),
-          ValueListenableBuilder<bool>(
-            valueListenable: widget.landscape,
+            children: [
+              _buildTimerButton(),
+              _buildStatusButton(),
+              _buildBatteryButton(),
+              _buildPlayModeButton(),
+              ValueListenableBuilder<bool>(
+                valueListenable: widget.landscape,
                 builder: (_, isLandscape, _) => IconButton(
                   icon: Icon(
                     isLandscape

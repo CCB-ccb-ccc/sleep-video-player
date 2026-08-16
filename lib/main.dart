@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:audio_service/audio_service.dart';
 import 'audio/audio_player_handler.dart';
+import 'core/app_settings.dart';
 import 'debug/diag.dart';
 import 'models/local_video_model.dart';
 import 'pages/home_page.dart';
@@ -9,6 +10,9 @@ import 'pages/video_play_page.dart';
 Future<void> main() async {
   // 必须在任何插件调用前初始化 Flutter 绑定
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 预加载全局设置（后台播放开关、播放模式），供设置页与播放页共享。
+  await AppSettings.instance.load();
 
   // 全局错误兜底：任何 widget 抛错都显示可读错误页，而不是卡在原生开屏/黑屏。
   ErrorWidget.builder = (details) {

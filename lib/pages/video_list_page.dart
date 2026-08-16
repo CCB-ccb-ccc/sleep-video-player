@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import '../core/app_settings.dart';
 import '../core/folder_store.dart';
 import '../core/permission_utils.dart';
+import '../core/video_name_store.dart';
 import '../core/video_scan_utils.dart';
 import '../models/local_video_model.dart';
 import '../widgets/video_grid_item.dart';
@@ -22,18 +24,23 @@ class _VideoListPageState extends State<VideoListPage> {
   String? _selectedFolder; // null = 全部
   bool _loading = false;
   bool _permissionDenied = false;
+  // 路径 -> 显示名称（自定义或默认文件名）
+  Map<String, String> _names = {};
 
   @override
   void initState() {
     super.initState();
     // 设置页增删/改名文件夹后自动刷新（通过 FolderStore.changed 通知）
     FolderStore.changed.addListener(_onFoldersChanged);
+    // 视频重命名后自动刷新名称显示
+    VideoNameStore.changed.addListener(_onNamesChanged);
     _init();
   }
 
   @override
   void dispose() {
     FolderStore.changed.removeListener(_onFoldersChanged);
+    VideoNameStore.changed.removeListener(_onNamesChanged);
     super.dispose();
   }
 
@@ -41,6 +48,18 @@ class _VideoListPageState extends State<VideoListPage> {
     // 文件夹集合/名称变化：重新加载文件夹与视频
     _loadFolders();
     _loadVideos();
+  }
+
+  void _onNamesChanged() {
+    // 视频名称变化：刷新名称缓存
+    _loadNames();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _loadNames() async {
+    final paths = _videos.map((v) => v.filePath).toList();
+    final map = await VideoNameStore.getAll(paths);
+    if (mounted) setState(() => _names = map);
   }
 
   /// 启动优先执行权限校验（任务 6.2）
@@ -82,6 +101,7 @@ class _VideoListPageState extends State<VideoListPage> {
         _loading = false;
       });
     }
+    await _loadNames();
   }
 
   /// 重新扫描：清缓存重扫（任务 4.4 / 任务 3.6）
@@ -104,6 +124,7 @@ class _VideoListPageState extends State<VideoListPage> {
         _loading = false;
       });
     }
+    await _loadNames();
   }
 
   /// 按当前选中的文件夹筛选视频；null = 全部。
@@ -120,6 +141,42 @@ class _VideoListPageState extends State<VideoListPage> {
       '/play',
       arguments: {'videos': _displayed, 'index': index},
     );
+  }
+
+  /// 长按视频卡片：重命名显示名称（自定义，默认文件名）。
+  Future<void> _renameVideo(LocalVideoModel video) async {
+    final current = _names[video.filePath] ??
+        VideoNameStore.defaultName(video.filePath);
+    final ctrl = TextEditingController(text: current);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('视频名称', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: '留空则使用文件名',
+            hintStyle: TextStyle(color: Colors.grey),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('确定', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (name == null) return;
+    await VideoNameStore.setName(video.filePath, name);
+    _snack(name.isEmpty ? '已恢复为默认文件名' : '已重命名');
   }
 
   /// 顶部文件夹切换导航栏：全部 + 各文件夹（显示自定义名）
@@ -264,9 +321,14 @@ class _VideoListPageState extends State<VideoListPage> {
       ),
       itemCount: _displayed.length,
       itemBuilder: (context, index) {
-        return VideoGridItem(
-          video: _displayed[index],
-          onTap: () => _openVideo(index),
+        final v = _displayed[index];
+        return GestureDetector(
+          onLongPress: () => _renameVideo(v),
+          child: VideoGridItem(
+            video: v,
+            displayName: _names[v.filePath] ?? '',
+            onTap: () => _openVideo(index),
+          ),
         );
       },
     );

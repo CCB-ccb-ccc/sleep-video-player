@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../core/app_settings.dart';
 import '../core/folder_store.dart';
 import '../core/video_scan_utils.dart';
 
@@ -122,6 +123,41 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // 后台播放开关（持久化，跨应用重启仍生效）
+          ValueListenableBuilder<bool>(
+            valueListenable: AppSettings.instance.backgroundPlayNotifier,
+            builder: (_, enabled, _) => Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('后台播放',
+                            style: TextStyle(color: Colors.white, fontSize: 14)),
+                        SizedBox(height: 2),
+                        Text(
+                          '开启后息屏/切后台声音继续；退出到首页也会停止。',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: enabled,
+                    activeColor: Colors.amber,
+                    onChanged: (v) => AppSettings.instance.setBackgroundPlay(v),
+                  ),
+                ],
+              ),
+            ),
+          ),
           const Text(
             '视频来源',
             style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
