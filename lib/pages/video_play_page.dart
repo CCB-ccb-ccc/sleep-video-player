@@ -158,8 +158,11 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 音频服务在 main 中已初始化，这里取其实例（全局单例）
-    _handler = globalAudioHandler;
+    // 音频服务在 main 中“异步”初始化（为防开屏卡死），这里先取当前值；
+    // 若尚未就绪，globalAudioHandler 的 listener 会在其就绪后自动接管，
+    // 避免“启动顺序竞争”导致一直拿不到 handler 而彻底没声音。
+    _handler = globalAudioHandler.value;
+    globalAudioHandler.addListener(_onHandlerReady);
 
     _vpc = VideoPlayerController.file(File(widget.model.filePath));
     _vpc.addListener(_onVideoChanged);
@@ -196,11 +199,39 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     }
   }
 
-  /// 成为激活项：加载音频到音频服务并开始播放（视频静音同步）
+  /// 音频服务初始化完成（或失败置 null）后触发：若本项激活且尚未用上音频服务，
+  /// 立即接管，避免因为“启动顺序竞争”导致一直拿不到 handler 而彻底没声音。
+  void _onHandlerReady() {
+    final h = globalAudioHandler.value;
+    _handler = h;
+    if (h != null && _isActive && _initialized) {
+      _activate();
+    }
+  }
+
+  /// 成为激活项：加载音频到音频服务并开始播放（视频静音同步）。
+  /// 若音频服务尚未就绪/失败：退化用视频播放器自身出声（仅前台可用），
+  /// 绝不再因为拿不到 handler 就“彻底静音”。
   Future<void> _activate() async {
-    if (!_initialized || _handler == null) return;
+    if (!_initialized) return;
+    // 每次都重新读取最新 handler（它可能在 init 完成后才就绪）
+    final handler = globalAudioHandler.value;
+    _handler = handler;
+    if (handler == null) {
+      // 退化路径：直接用 video_player 出声（前台可用，后台不续播）
+      _audioReady = false;
+      _vpc.setVolume(1);
+      if (_playbackIntended && _vpc.value.isInitialized) _vpc.play();
+      if (mounted) {
+        setState(() {
+          _isPlaying = _playbackIntended;
+          _showControls = false;
+        });
+      }
+      return;
+    }
     try {
-      await _handler!.loadFile(widget.model.filePath);
+      await handler.loadFile(widget.model.filePath);
       _audioReady = true;
       _vpc.setVolume(0); // 正常：声音走音频服务
     } catch (_) {
@@ -210,8 +241,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     }
     if (!mounted) return;
     if (_playbackIntended) {
-      if (_audioReady) _handler!.player.play();
-      _vpc.play(); // 静音/兜底视频
+      if (_audioReady) handler.player.play();
+      if (_vpc.value.isInitialized) _vpc.play();
     }
     if (mounted) {
       setState(() {
@@ -439,6 +470,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _autoHideTimer?.cancel();
     _sleepTimer?.cancel();
     _syncTimer?.cancel();
+    globalAudioHandler.removeListener(_onHandlerReady);
     widget.activeIndex.removeListener(_onActiveChanged);
     WidgetsBinding.instance.removeObserver(this);
     _vpc.removeListener(_onVideoChanged);

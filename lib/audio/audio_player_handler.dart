@@ -1,10 +1,13 @@
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
-/// 全局音频服务处理器实例。
+/// 全局音频服务处理器实例（用 ValueNotifier 包裹，便于播放页在 init 完成后感知）。
 /// 说明：audio_service 0.18 起移除了 `AudioService.handler` 静态成员，
-/// 改为由 `AudioService.init(...)` 的返回值持有，这里用全局变量中转供播放页访问。
-AudioPlayerHandler? globalAudioHandler;
+/// 改为由 `AudioService.init(...)` 的返回值持有；这里用全局 notifier 中转供播放页访问。
+/// 播放页通过 addListener 在初始化完成时自动接管，避免因启动顺序竞争拿到 null 而彻底没声音。
+final ValueNotifier<AudioPlayerHandler?> globalAudioHandler =
+    ValueNotifier<AudioPlayerHandler?>(null);
 
 /// 音频服务处理器：用 just_audio 播放“同一视频文件”的音频轨道。
 ///

@@ -41,16 +41,25 @@
              audio_service 0.18 插件 manifest 为空、不自带声明，必须由 App 显式声明，
              否则运行时绑定 AudioService 失败 → AudioService.init 抛错 → App 卡开屏。
              foregroundServiceType=mediaPlayback 配合 FOREGROUND_SERVICE 权限，
-             满足 Android 14+ 后台媒体播放要求。 -->
+             满足 Android 14+ 后台媒体播放要求。声明与官方示例保持一致。 -->
         <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- 媒体按钮（耳机/蓝牙按键）接收器：audio_service 自带组件，官方示例要求声明，
+             将 MEDIA_BUTTON 广播交给音频服务处理（息屏后用耳机键控播放/暂停）。 -->
+        <receiver
+            android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

@@ -38,7 +38,7 @@ Future<void> main() async {
 /// 失败不影响 App 启动；播放页在 handler 为空时会降级用 video_player 出声（仅前台可用）。
 Future<void> _initAudioService() async {
   try {
-    globalAudioHandler = await AudioService.init(
+    globalAudioHandler.value = await AudioService.init(
       builder: () => AudioPlayerHandler(),
       config: AudioServiceConfig(
         androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
@@ -48,7 +48,7 @@ Future<void> _initAudioService() async {
       ),
     ) as AudioPlayerHandler;
   } catch (e, st) {
-    globalAudioHandler = null;
+    globalAudioHandler.value = null;
     debugPrint('AudioService.init 失败，降级为前台播放: $e\n$st');
   }
 }
