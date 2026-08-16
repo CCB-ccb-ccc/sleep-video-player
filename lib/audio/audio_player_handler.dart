@@ -1,6 +1,7 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
+import '../debug/diag.dart';
 
 /// 全局音频服务处理器实例（用 ValueNotifier 包裹，便于播放页在 init 完成后感知）。
 /// 说明：audio_service 0.18 起移除了 `AudioService.handler` 静态成员，
@@ -51,28 +52,40 @@ class AudioPlayerHandler extends BaseAudioHandler with SeekHandler {
 
   /// 加载本地文件（视频文件仅取音频轨道）。同一路径只加载一次。
   Future<Duration?> loadFile(String path) async {
-    if (_loadedPath == path &&
-        _player.processingState != ProcessingState.idle) {
-      return _player.duration;
+    try {
+      if (_loadedPath == path &&
+          _player.processingState != ProcessingState.idle) {
+        return _player.duration;
+      }
+      _loadedPath = path;
+      final duration = await _player.setAudioSource(AudioSource.file(path));
+      mediaItem.add(
+        MediaItem(
+          id: path,
+          album: '助眠播放器',
+          title: path.split('/').last,
+          duration: duration,
+        ),
+      );
+      diag('loadFile OK file=${path.split('/').last} dur=$duration');
+      return duration;
+    } catch (e) {
+      diag('loadFile FAIL file=${path.split('/').last} err=$e');
+      rethrow;
     }
-    _loadedPath = path;
-    final duration = await _player.setAudioSource(AudioSource.file(path));
-    mediaItem.add(
-      MediaItem(
-        id: path,
-        album: '助眠播放器',
-        title: path.split('/').last,
-        duration: duration,
-      ),
-    );
-    return duration;
   }
 
   @override
-  Future<void> play() => _player.play();
+  Future<void> play() {
+    diag('audio play');
+    return _player.play();
+  }
 
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() {
+    diag('audio pause');
+    return _player.pause();
+  }
 
   @override
   Future<void> stop() => _player.stop();

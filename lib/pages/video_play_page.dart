@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:android_intent_plus/android_intent_plus.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../audio/audio_player_handler.dart';
 import '../models/local_video_model.dart';
+import '../debug/diag.dart';
 
 /// 播放页容器：底部竖向滑动切换视频（抖音式）。
 /// 页面级统一管理：横屏、后台播放开关、当前激活序号。
@@ -214,11 +216,13 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   /// 绝不再因为拿不到 handler 就“彻底静音”。
   Future<void> _activate() async {
     if (!_initialized) return;
+    diag('activate: isActive=$_isActive');
     // 每次都重新读取最新 handler（它可能在 init 完成后才就绪）
     final handler = globalAudioHandler.value;
     _handler = handler;
     if (handler == null) {
       // 退化路径：直接用 video_player 出声（前台可用，后台不续播）
+      diag('activate: handler=null -> 退化 video 出声(仅前台)');
       _audioReady = false;
       _vpc.setVolume(1);
       if (_playbackIntended && _vpc.value.isInitialized) _vpc.play();
@@ -234,8 +238,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       await handler.loadFile(widget.model.filePath);
       _audioReady = true;
       _vpc.setVolume(0); // 正常：声音走音频服务
+      diag('activate: 音频服务加载成功, 走音频路径');
     } catch (_) {
       // 兜底：音频服务加载失败，则直接用视频播放器出声（仅前台可用）
+      diag('activate: 音频加载失败 -> 退化 video 出声');
       _audioReady = false;
       _vpc.setVolume(1);
     }
@@ -384,12 +390,13 @@ class _VideoPlayItemState extends State<VideoPlayItem>
           final willOn = !bg;
           widget.onToggleBackground(willOn);
           if (willOn && mounted) {
+            diag('后台播放开关=开');
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                duration: Duration(seconds: 5),
+                duration: Duration(seconds: 6),
                 content: Text(
-                  '已开启后台播放：息屏/锁屏后声音会由系统媒体服务继续播放。'
-                  '若个别激进省电机型仍中断，请到 设置→应用→助眠播放器→电池→改为“不受限制”。',
+                  '已开启后台播放。若息屏仍断声，请点右上角「续航」把本App设为“电池不受限制”，'
+                  '荣耀/华为会杀掉未设白名单的后台媒体服务。',
                   style: TextStyle(color: Colors.white),
                 ),
               ),
@@ -406,6 +413,72 @@ class _VideoPlayItemState extends State<VideoPlayItem>
           style: TextStyle(color: bg ? Colors.amber : Colors.white, fontSize: 12),
         ),
       ),
+    );
+  }
+
+  /// 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制 / 受保护应用”，
+  /// 这是荣耀/华为息屏后不杀后台媒体的决定性步骤。
+  Future<void> _openBatterySettings() async {
+    const intent = AndroidIntent(
+      action: 'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+      data: 'package:com.sleep.localvideoplayer',
+    );
+    try {
+      await intent.launch();
+      diag('openBatterySettings: 跳转电池优化豁免页');
+    } catch (e) {
+      // 部分机型无此 action，退回应用详情页
+      const intent2 = AndroidIntent(
+        action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
+        data: 'package:com.sleep.localvideoplayer',
+      );
+      try {
+        await intent2.launch();
+        diag('openBatterySettings: 跳转应用详情页');
+      } catch (e2) {
+        diag('openBatterySettings FAIL: $e2');
+      }
+    }
+  }
+
+  /// 诊断状态浮层：把后台播放链路关键事件打出来，方便用户截图定位“息屏断声”根因。
+  Widget _buildStatusButton() {
+    return TextButton.icon(
+      onPressed: () => showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
+          backgroundColor: Colors.grey[900],
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 340,
+            child: SingleChildScrollView(
+              child: Text(
+                kDiagLog.isEmpty ? '（暂无记录）' : kDiagLog.join('\n'),
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 11, fontFamily: 'monospace'),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      ),
+      icon: const Icon(Icons.bug_report, color: Colors.white, size: 20),
+      label: const Text('状态', style: TextStyle(color: Colors.white, fontSize: 12)),
+    );
+  }
+
+  /// 续航设置按钮：一键跳转电池白名单设置。
+  Widget _buildSettingsButton() {
+    return TextButton.icon(
+      onPressed: _openBatterySettings,
+      icon: const Icon(Icons.battery_charging_full, color: Colors.white, size: 20),
+      label: const Text('续航', style: TextStyle(color: Colors.white, fontSize: 12)),
     );
   }
 
@@ -437,8 +510,12 @@ class _VideoPlayItemState extends State<VideoPlayItem>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final audioPlaying =
+        _audioReady && _handler != null && _handler!.player.playing;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
+      diag('lifecycle=离开前台($state) 后台开关=${widget.backgroundPlay.value} '
+          'audioPlayingBefore=$audioPlaying');
       // 离开前台：释放屏幕唤醒锁，允许息屏
       WakelockPlus.disable().catchError((_) {});
       if (widget.backgroundPlay.value) {
@@ -449,6 +526,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         _pauseAll();
       }
     } else if (state == AppLifecycleState.resumed) {
+      diag('lifecycle=resumed 回前台 audioPlayingAfter=$audioPlaying');
       // 回到前台：恢复常亮 + 视频画面
       WakelockPlus.enable().catchError((_) {});
       if (widget.backgroundPlay.value) {
@@ -535,11 +613,13 @@ class _VideoPlayItemState extends State<VideoPlayItem>
           right: 8,
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildTimerButton(),
-              _buildBackgroundButton(),
-              ValueListenableBuilder<bool>(
-                valueListenable: widget.landscape,
+        children: [
+          _buildTimerButton(),
+          _buildStatusButton(),
+          _buildBackgroundButton(),
+          _buildSettingsButton(),
+          ValueListenableBuilder<bool>(
+            valueListenable: widget.landscape,
                 builder: (_, isLandscape, _) => IconButton(
                   icon: Icon(
                     isLandscape

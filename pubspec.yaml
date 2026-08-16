@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.11.0+13
+version: 1.12.0+14
 
 environment:
   sdk: ^3.12.2
@@ -42,6 +42,7 @@ dependencies:
   # just_audio 在其内部播放音频轨道，息屏/切后台/锁屏均不中断（华为等机型亦尊重）。
   audio_service: ^0.18.0
   just_audio: ^0.9.0
+  android_intent_plus: ^3.1.0   # 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制”
   path_provider: ^2.1.5        # 应用私有缓存目录（规范 3.3 引用 getApplicationCacheDirectory）
   path: ^1.9.0                 # 路径解析工具（扫描工具使用 p.basename/p.join/p.extension）
   file_picker: ^12.0.0         # 选择文件夹（用户指定视频目录，避免全盘遍历）

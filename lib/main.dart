@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:audio_service/audio_service.dart';
 import 'audio/audio_player_handler.dart';
+import 'debug/diag.dart';
 import 'models/local_video_model.dart';
 import 'pages/home_page.dart';
 import 'pages/video_play_page.dart';
@@ -47,8 +48,10 @@ Future<void> _initAudioService() async {
         androidShowNotificationBadge: false,
       ),
     ) as AudioPlayerHandler;
+    diag('AudioService.init OK');
   } catch (e, st) {
     globalAudioHandler.value = null;
+    diag('AudioService.init FAIL: $e');
     debugPrint('AudioService.init 失败，降级为前台播放: $e\n$st');
   }
 }
