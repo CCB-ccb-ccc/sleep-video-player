@@ -42,7 +42,7 @@ dependencies:
   # just_audio 在其内部播放音频轨道，息屏/切后台/锁屏均不中断（华为等机型亦尊重）。
   audio_service: ^0.18.0
   just_audio: ^0.9.0
-  android_intent_plus: ^3.1.0   # 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制”
+  android_intent_plus: ^6.0.0   # 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制”（>=4.0 起 build.gradle 自带 namespace，兼容 AGP 9）
   path_provider: ^2.1.5        # 应用私有缓存目录（规范 3.3 引用 getApplicationCacheDirectory）
   path: ^1.9.0                 # 路径解析工具（扫描工具使用 p.basename/p.join/p.extension）
   file_picker: ^12.0.0         # 选择文件夹（用户指定视频目录，避免全盘遍历）
