@@ -188,9 +188,11 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     });
 
     widget.activeIndex.addListener(_onActiveChanged);
-    // 每 500ms 把静音画面seek到音频进度，保持画面与声音同步
-    _syncTimer =
-        Timer.periodic(const Duration(milliseconds: 500), (_) => _syncVideo());
+        // 每 1000ms 把静音画面 seek 到音频进度，保持画面与声音同步。
+        // 频率从 500ms 降到 1000ms、容差从 400ms 提到 1000ms，
+        // 减少荣耀/华为机型因频繁 seek 导致的卡顿。
+        _syncTimer = Timer.periodic(
+            const Duration(milliseconds: 1000), (_) => _syncVideo());
   }
 
   void _onActiveChanged() {
@@ -240,6 +242,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       _audioReady = true;
       _vpc.setVolume(0); // 正常：声音走音频服务
       diag('activate: 音频服务加载成功, 走音频路径');
+      // 把音频起点对齐到视频当前进度，避免声音从头开始/画面被 seek 回 0 造成卡顿
+      if (_vpc.value.isInitialized) {
+        await handler.player.seek(_vpc.value.position);
+      }
     } catch (_) {
       // 兜底：音频服务加载失败，则直接用视频播放器出声（仅前台可用）
       diag('activate: 音频加载失败 -> 退化 video 出声');
@@ -292,7 +298,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (!_handler!.player.playing) return;
     final ap = _handler!.player.position;
     final vp = _vpc.value.position;
-    if ((ap - vp).abs() > const Duration(milliseconds: 400)) {
+    // 容差提到 1000ms：减少低端机/荣耀机型频繁 seek 导致的卡顿
+    if ((ap - vp).abs() > const Duration(milliseconds: 1000)) {
       _vpc.seekTo(ap);
     }
   }
@@ -520,7 +527,13 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       // 离开前台：释放屏幕唤醒锁，允许息屏
       WakelockPlus.disable().catchError((_) {});
       if (widget.backgroundPlay.value) {
-        // 后台播放开启：音频服务（媒体服务）继续出声；仅暂停本项视频解码省电
+        // 后台播放开启：音频服务（媒体服务）继续出声；仅暂停本项视频解码省电。
+        // 某些机型息屏时会触发音频焦点丢失导致 just_audio 自动 pause，
+        // 这里显式 play() 一次确保音频继续（若已在播则无影响）。
+        if (_audioReady && _handler != null) {
+          _handler!.player.play();
+          diag('lifecycle: 后台模式下离开前台，已确保音频继续播放');
+        }
         if (_vpc.value.isInitialized) _vpc.pause();
       } else {
         // 未开启：离开即整体暂停

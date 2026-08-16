@@ -16,7 +16,12 @@ final ValueNotifier<AudioPlayerHandler?> globalAudioHandler =
 /// 该服务独立于 Flutter 的 Activity —— 因此息屏 / 切后台 / 锁屏时，即使 Activity 被系统回收，
 /// 媒体服务仍会继续出声。这正是 video_player（绑定 Activity）在华为上息屏即停的根本解法。
 class AudioPlayerHandler extends BaseAudioHandler with SeekHandler {
-  final AudioPlayer _player = AudioPlayer();
+  // handleAudioSessionActivation=false：禁止 just_audio 自动处理音频焦点/会话。
+  // 否则荣耀/华为息屏或系统通知可能触发焦点丢失，导致音频被自动 pause，
+  // 出现“息屏后需在锁屏界面再点播放键”的现象。
+  final AudioPlayer _player = AudioPlayer(
+    handleAudioSessionActivation: false,
+  );
   String? _loadedPath;
 
   AudioPlayerHandler() {
