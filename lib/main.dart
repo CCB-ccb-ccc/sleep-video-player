@@ -39,16 +39,29 @@ Future<void> main() async {
 /// 失败不影响 App 启动；播放页在 handler 为空时会降级用 video_player 出声（仅前台可用）。
 Future<void> _initAudioService() async {
   try {
-    globalAudioHandler.value = await AudioService.init(
+    diag('AudioService.init START');
+    final handler = await AudioService.init(
       builder: () => AudioPlayerHandler(),
       config: AudioServiceConfig(
         androidNotificationChannelId: 'com.sleep.localvideoplayer.audio',
         androidNotificationChannelName: '助眠播放器',
         androidNotificationOngoing: true,
         androidShowNotificationBadge: false,
+        // Android 12+ 在 pause 后重启前台服务可能抛 ForegroundServiceStartNotAllowedException。
+        // 设为 false：暂停时仍保持前台服务，避免后台被系统禁止重启。对助眠场景必要。
+        androidStopForegroundOnPause: false,
       ),
-    ) as AudioPlayerHandler;
-    diag('AudioService.init OK');
+    );
+    if (handler is AudioPlayerHandler) {
+      globalAudioHandler.value = handler;
+      diag('AudioService.init OK type=${handler.runtimeType}');
+    } else if (handler == null) {
+      globalAudioHandler.value = null;
+      diag('AudioService.init FAIL: returned null');
+    } else {
+      globalAudioHandler.value = null;
+      diag('AudioService.init FAIL: unexpected type ${handler.runtimeType}');
+    }
   } catch (e, st) {
     globalAudioHandler.value = null;
     diag('AudioService.init FAIL: $e');

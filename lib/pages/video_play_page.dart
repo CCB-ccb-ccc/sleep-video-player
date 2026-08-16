@@ -220,6 +220,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     // 每次都重新读取最新 handler（它可能在 init 完成后才就绪）
     final handler = globalAudioHandler.value;
     _handler = handler;
+    diag('activate: handler=${handler?.runtimeType ?? 'null'}');
     if (handler == null) {
       // 退化路径：直接用 video_player 出声（前台可用，后台不续播）
       diag('activate: handler=null -> 退化 video 出声(仅前台)');

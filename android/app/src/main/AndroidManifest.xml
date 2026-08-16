@@ -10,6 +10,9 @@
          audio_service 0.18 的插件 manifest 不再自带声明，需由 App 补回。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- audio_service README 要求：息屏/后台播放时保持 CPU 唤醒，避免系统休眠导致音频中断。
+         现代 Android 仍要求显式声明。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:label="助眠播放器"
         android:name="${applicationName}"
