@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:android_intent_plus/android_intent_plus.dart';
+import 'package:android_intent_plus/android_intent.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
@@ -419,7 +419,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   /// 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制 / 受保护应用”，
   /// 这是荣耀/华为息屏后不杀后台媒体的决定性步骤。
   Future<void> _openBatterySettings() async {
-    const intent = AndroidIntent(
+    final intent = AndroidIntent(
       action: 'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
       data: 'package:com.sleep.localvideoplayer',
     );
@@ -428,7 +428,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       diag('openBatterySettings: 跳转电池优化豁免页');
     } catch (e) {
       // 部分机型无此 action，退回应用详情页
-      const intent2 = AndroidIntent(
+      final intent2 = AndroidIntent(
         action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
         data: 'package:com.sleep.localvideoplayer',
       );
