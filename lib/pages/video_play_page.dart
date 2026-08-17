@@ -10,6 +10,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../audio/audio_player_handler.dart';
 import '../core/app_settings.dart';
+import '../core/sleep_timer.dart';
 import '../core/video_name_store.dart';
 import '../debug/diag.dart';
 import '../models/local_video_model.dart';
@@ -143,13 +144,12 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _audioReady = false; // 音频服务是否已加载本文件
   // 自定义控制面板：仅由「设置」按钮呼出，默认隐藏
   bool _showControls = false;
-  // 设置模式：点齿轮按钮切换；为 true 时顶部显示一行快捷按钮（状态/续航/播放模式等），否则隐藏
-  bool _settingsExpanded = false;
   bool _isPlaying = true;
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
-  Timer? _sleepTimer;
   Timer? _syncTimer; // 静音画面与音频进度对齐
+  // 定时关闭到期时由全局 SleepTimer 调用，暂停当前激活页的音视频
+  late final VoidCallback _onTimerExpire;
   AudioPlayerHandler? _handler;
   String _displayName = '';
 
@@ -161,6 +161,18 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     WidgetsBinding.instance.addObserver(this);
     _handler = globalAudioHandler.value;
     globalAudioHandler.addListener(_onHandlerReady);
+    // 注册“定时关闭到期”回调：到期时暂停本页音视频（全局 SleepTimer 仅在激活页注册）
+    _onTimerExpire = () {
+      _pauseAll();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已到设定时间，已停止播放'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    };
 
     // 视频显示名称（自定义或默认文件名）
     _loadName();
@@ -267,6 +279,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   /// 成为激活项：加载音频到音频服务并开始播放（视频静音同步）。
   Future<void> _activate() async {
     if (!_initialized) return;
+    // 成为激活页：接管“定时关闭到期”的暂停回调
+    SleepTimer.instance.onExpire = _onTimerExpire;
     diag('activate: isActive=$_isActive');
     final handler = globalAudioHandler.value;
     _handler = handler;
@@ -355,9 +369,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     });
   }
 
-  // ===== 定时关闭（睡眠定时） =====
-  int? _sleepMinutes;
-  int _sleepRemaining = 0;
+  // ===== 定时关闭（睡眠定时，状态已移入全局 SleepTimer，跨视频切换持续生效） =====
   String _fmtSleep(int sec) {
     final m = sec ~/ 60;
     final s = sec % 60;
@@ -365,14 +377,21 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   }
 
   Widget _buildTimerButton() {
-    final active = _sleepMinutes != null;
-    return TextButton.icon(
-      onPressed: _pickSleepTimer,
-      icon: Icon(Icons.timer, color: active ? Colors.amber : Colors.white, size: 20),
-      label: Text(
-        active ? _fmtSleep(_sleepRemaining) : '定时',
-        style: TextStyle(color: active ? Colors.amber : Colors.white, fontSize: 12),
-      ),
+    return ValueListenableBuilder<int?>(
+      valueListenable: SleepTimer.instance.remaining,
+      builder: (_, rem, __) {
+        final active = rem != null;
+        return TextButton.icon(
+          onPressed: _pickSleepTimer,
+          icon: Icon(Icons.timer,
+              color: active ? Colors.amber : Colors.white, size: 20),
+          label: Text(
+            active ? _fmtSleep(rem!) : '定时',
+            style: TextStyle(
+                color: active ? Colors.amber : Colors.white, fontSize: 12),
+          ),
+        );
+      },
     );
   }
 
@@ -384,7 +403,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         backgroundColor: Colors.grey[900],
         children: [
           SimpleDialogOption(
-            child: const Text('关闭', style: TextStyle(color: Colors.white)),
+            child: const Text('关闭（取消定时）', style: TextStyle(color: Colors.white)),
             onPressed: () => Navigator.pop(context, null),
           ),
           for (final m in [15, 30, 45, 60, 75, 90, 105, 120])
@@ -395,42 +414,12 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         ],
       ),
     );
-    if (choice == null && _sleepMinutes == null) return;
-    _setSleepTimer(choice);
-  }
-
-  void _setSleepTimer(int? minutes) {
-    _sleepTimer?.cancel();
-    _sleepTimer = null;
-    if (minutes == null) {
-      _sleepMinutes = null;
-      _sleepRemaining = 0;
+    if (choice == null) {
+      SleepTimer.instance.cancel();
     } else {
-      _sleepMinutes = minutes;
-      _sleepRemaining = minutes * 60;
-      _sleepTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-        if (!mounted) {
-          t.cancel();
-          return;
-        }
-        _sleepRemaining -= 1;
-        if (_sleepRemaining <= 0) {
-          t.cancel();
-          _sleepTimer = null;
-          _sleepMinutes = null;
-          _sleepRemaining = 0;
-          _pauseAll();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('已到设定时间，已停止播放'),
-              duration: Duration(seconds: 3),
-            ),
-          );
-        }
-        if (mounted) setState(() {});
-      });
+      SleepTimer.instance.start(choice);
     }
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
   /// 一键跳转系统电池/应用设置，引导用户把本 App 设为“电池不受限制 / 受保护应用”。
@@ -593,37 +582,79 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         name.isEmpty ? VideoNameStore.defaultName(widget.model.filePath) : name);
   }
 
-  /// 「设置」按钮：点一下切换“设置模式”，顶部出现一行快捷按钮（仅设置模式时可见）。
+  /// 「设置」按钮：播放页顶部永远只显示这一个按钮；点击弹出设置窗口。
   Widget _buildSettingsButton() {
     return IconButton(
-      icon: Icon(Icons.settings,
-          color: _settingsExpanded ? Colors.amber : Colors.white),
-      tooltip: _settingsExpanded ? '收起设置' : '设置',
-      onPressed: () => setState(() => _settingsExpanded = !_settingsExpanded),
+      icon: const Icon(Icons.settings, color: Colors.white),
+      tooltip: '设置',
+      onPressed: _openSettingsSheet,
     );
   }
 
-  /// 设置模式下顶部一行快捷按钮（状态/续航/播放模式 + 定时关闭/视频名称，避免功能丢失）。
-  /// 仅当 _settingsExpanded 为 true 时由 build 渲染，故“不在设置界面时看不到”。
-  Widget _buildSettingsToolbar() {
-    return Positioned(
-      top: 56,
-      left: 8,
-      right: 8,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-        decoration: BoxDecoration(
-          color: Colors.black.withAlpha(150),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+  /// 设置弹出窗口（底部弹窗）：集成定时关闭 / 播放模式 / 视频名称 / 诊断状态 / 续航。
+  /// 其中「播放模式」下方实时显示当前选择（呼应此前需求）。
+  void _openSettingsSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _buildTimerButton(),
-            _buildPlayModeButton(),
-            _buildNameButton(),
-            _buildStatusButton(),
-            _buildBatteryButton(),
+            ListTile(
+              leading: const Icon(Icons.timer, color: Colors.white),
+              title: const Text('定时关闭', style: TextStyle(color: Colors.white)),
+              subtitle: ValueListenableBuilder<int?>(
+                valueListenable: SleepTimer.instance.remaining,
+                builder: (_, rem, __) => Text(
+                  rem == null ? '未设置' : '剩余 ${_fmtSleep(rem)}',
+                  style: const TextStyle(color: Colors.amber, fontSize: 12),
+                ),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                _pickSleepTimer();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.playlist_play, color: Colors.white),
+              title: const Text('播放模式', style: TextStyle(color: Colors.white)),
+              subtitle: ValueListenableBuilder<PlayMode>(
+                valueListenable: AppSettings.instance.playModeNotifier,
+                builder: (_, mode, __) => Text(
+                  mode.label,
+                  style: const TextStyle(color: Colors.amber, fontSize: 12),
+                ),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                _pickPlayMode();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note, color: Colors.white),
+              title: const Text('视频名称', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _renameCurrent();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.bug_report, color: Colors.white),
+              title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _showStatusDialog();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.battery_charging_full, color: Colors.white),
+              title: const Text('续航白名单', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(context);
+                _openBatterySettings();
+              },
+            ),
           ],
         ),
       ),
@@ -649,7 +680,17 @@ class _VideoPlayItemState extends State<VideoPlayItem>
 
   Future<void> _playAll() async {
     if (_audioReady && _handler != null) await _handler!.player.play();
-    if (_vpc.value.isInitialized) _vpc.play();
+    if (_vpc.value.isInitialized) {
+      _vpc.play();
+      // 唤醒画面：双引擎架构下，部分设备 pause→resume 后视频纹理不刷新
+      // （音频/视频进度几乎一致，_syncVideo 因差值<1000ms 不会重新 seek），
+      // 导致画面停在暂停帧。这里主动把静音画面重新定位到音频当前进度，
+      // 触发一次重新渲染，恢复流畅。
+      final p = (_audioReady && _handler != null)
+          ? _handler!.player.position
+          : _vpc.value.position;
+      _vpc.seekTo(p);
+    }
     _isPlaying = true;
     _playbackIntended = true;
   }
@@ -709,8 +750,11 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   @override
   void dispose() {
     _autoHideTimer?.cancel();
-    _sleepTimer?.cancel();
     _syncTimer?.cancel();
+    // 若本页仍是定时关闭的回调持有者，则解绑（避免回调悬空）
+    if (SleepTimer.instance.onExpire == _onTimerExpire) {
+      SleepTimer.instance.onExpire = null;
+    }
     globalAudioHandler.removeListener(_onHandlerReady);
     widget.activeIndex.removeListener(_onActiveChanged);
     WidgetsBinding.instance.removeObserver(this);
@@ -740,16 +784,14 @@ class _VideoPlayItemState extends State<VideoPlayItem>
           ),
           // 视频名称：竖屏常显；横屏仅进度条（控制面板）显示时显示
           _buildNameOverlay(),
-          // 定时关闭倒计时（顶部中间，设置后常显）
-          if (_sleepMinutes != null) _buildSleepCountdown(),
-          // 「设置」按钮（右上角常显）
+          // 定时关闭倒计时（屏幕底部中间，全局，设置后常显）
+          _buildSleepCountdown(),
+          // 「设置」按钮（右上角常显，顶部唯一按钮）
           Positioned(
             top: 16,
             right: 8,
             child: _buildSettingsButton(),
           ),
-          // 设置模式下顶部一行快捷按钮（仅设置模式可见）
-          if (_settingsExpanded) _buildSettingsToolbar(),
           if (_showControls) _buildControls(),
         ],
       ),
@@ -786,33 +828,42 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     );
   }
 
-  /// 定时关闭倒计时：设置后显示在播放页顶部中间，常显（不依赖控制面板）。
+  /// 定时关闭倒计时：设置后显示在播放页底部中间，全局（跨视频切换持续显示）。
+  /// 由全局 SleepTimer 驱动；未设置时返回空，不占位。
   Widget _buildSleepCountdown() {
-    return Positioned(
-      top: 16,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.black.withAlpha(150),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.timer, color: Colors.amber, size: 16),
-              const SizedBox(width: 6),
-              Text(
-                _fmtSleep(_sleepRemaining),
-                style: const TextStyle(
-                    color: Colors.amber, fontSize: 14, fontWeight: FontWeight.bold),
+    return ValueListenableBuilder<int?>(
+      valueListenable: SleepTimer.instance.remaining,
+      builder: (_, rem, __) {
+        if (rem == null) return const SizedBox.shrink();
+        return Positioned(
+          bottom: 40,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(150),
+                borderRadius: BorderRadius.circular(14),
               ),
-            ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.timer, color: Colors.amber, size: 16),
+                  const SizedBox(width: 6),
+                  Text(
+                    _fmtSleep(rem),
+                    style: const TextStyle(
+                        color: Colors.amber,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
