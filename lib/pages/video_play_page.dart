@@ -531,15 +531,15 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         children: [
           SimpleDialogOption(
             child: Text('手动播放（看完不自动播）', style: TextStyle(color: Colors.white)),
-            onPressed: () => Navigator.pop(_, PlayMode.manual),
+            onPressed: () => Navigator.pop(context, PlayMode.manual),
           ),
           SimpleDialogOption(
             child: Text('顺序播放（自动播下一个）', style: TextStyle(color: Colors.white)),
-            onPressed: () => Navigator.pop(_, PlayMode.sequence),
+            onPressed: () => Navigator.pop(context, PlayMode.sequence),
           ),
           SimpleDialogOption(
             child: Text('单集循环（重复看本集）', style: TextStyle(color: Colors.white)),
-            onPressed: () => Navigator.pop(_, PlayMode.loopOne),
+            onPressed: () => Navigator.pop(context, PlayMode.loopOne),
           ),
         ],
       ),
