@@ -681,15 +681,14 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   Future<void> _playAll() async {
     if (_audioReady && _handler != null) await _handler!.player.play();
     if (_vpc.value.isInitialized) {
+      // 唤醒画面：双引擎架构下，部分设备 pause→resume 后视频纹理停在暂停帧，
+      // 表现为“单击续播后画面卡顿、需再点一次才流畅”。解决：先 seek 到
+      // “当前进度 -100ms”这一微小新位置（强制 ExoPlayer 解码出新一帧、纹理立即刷新），
+      // 再 play() 续播。向后 100ms 会在 0.1s 内被音频追上，不会造成长期音画错位。
+      final cur = _vpc.value.position;
+      final nudge = cur - const Duration(milliseconds: 100);
+      if (nudge > Duration.zero) await _vpc.seekTo(nudge);
       _vpc.play();
-      // 唤醒画面：双引擎架构下，部分设备 pause→resume 后视频纹理不刷新
-      // （音频/视频进度几乎一致，_syncVideo 因差值<1000ms 不会重新 seek），
-      // 导致画面停在暂停帧。这里主动把静音画面重新定位到音频当前进度，
-      // 触发一次重新渲染，恢复流畅。
-      final p = (_audioReady && _handler != null)
-          ? _handler!.player.position
-          : _vpc.value.position;
-      _vpc.seekTo(p);
     }
     _isPlaying = true;
     _playbackIntended = true;
@@ -712,34 +711,45 @@ class _VideoPlayItemState extends State<VideoPlayItem>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final audioPlaying =
-        _audioReady && _handler != null && _handler!.player.playing;
     final bgEnabled = AppSettings.instance.backgroundPlay;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
-      diag('lifecycle=离开前台($state) 后台开关=$bgEnabled '
-          'audioPlayingBefore=$audioPlaying');
       WakelockPlus.disable().catchError((_) {});
+      if (!_playbackIntended) {
+        // 用户已手动暂停：离开前台也保持暂停，绝不能强行续播音频/视频。
+        // 修复：暂停后息屏，视频又自动开始播放。
+        return;
+      }
       if (bgEnabled) {
-        // 后台播放开启（来自全局设置）：音频服务继续；仅暂停视频解码省电。
+        // 后台播放开启且用户希望播放：音频服务继续；仅暂停视频解码省电。
         if (_audioReady && _handler != null) {
           _handler!.player.play();
-          diag('lifecycle: 后台模式下离开前台，已确保音频继续播放');
         }
         if (_vpc.value.isInitialized) _vpc.pause();
       } else {
-        // 未开启：离开即整体暂停
+        // 未开启后台播放：离开前台即整体暂停
         _pauseAll();
       }
     } else if (state == AppLifecycleState.resumed) {
-      diag('lifecycle=resumed 回前台 audioPlayingAfter=$audioPlaying');
       WakelockPlus.enable().catchError((_) {});
-      if (bgEnabled) {
-        if (_vpc.value.isInitialized) _vpc.play();
-      } else {
-        if (_playbackIntended) {
+      if (_playbackIntended) {
+        if (bgEnabled) {
+          // 后台模式回到前台：恢复视频解码（音频本就在播）。
+          // 同样用“回退 100ms seek”强制刷新纹理，避免回到前台后画面卡顿。
+          if (_vpc.value.isInitialized) {
+            final cur = _vpc.value.position;
+            final nudge = cur - const Duration(milliseconds: 100);
+            if (nudge > Duration.zero) _vpc.seekTo(nudge);
+            _vpc.play();
+          }
+        } else {
           if (_audioReady && _handler != null) _handler!.player.play();
-          if (_vpc.value.isInitialized) _vpc.play();
+          if (_vpc.value.isInitialized) {
+            final cur = _vpc.value.position;
+            final nudge = cur - const Duration(milliseconds: 100);
+            if (nudge > Duration.zero) _vpc.seekTo(nudge);
+            _vpc.play();
+          }
           _isPlaying = true;
         }
       }

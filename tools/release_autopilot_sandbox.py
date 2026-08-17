@@ -116,13 +116,13 @@ def main():
     owner, repo = m.group(1), m.group(2)
     print(f"[info] 仓库: {owner}/{repo}")
 
-    # 远端 master 当前 SHA 作为父节点（避免依赖本地 refs，保证快进）
-    try:
-        _, bdata = gh_get(f"/repos/{owner}/{repo}/branches/master", token)
-        parent = bdata["commit"]["sha"]
-        print(f"[info] 远端 master: {parent[:8]}")
-    except Exception as e:
-        raise SystemExit("获取远端 master SHA 失败: " + str(e))
+    # 远端 master 当前 SHA 作为父节点（用 git ls-remote，避免依赖 api.github.com 权限）
+    ls_url = f"https://{token}@github.com/{owner}/{repo}.git"
+    rc, out, err = run(f"git ls-remote {ls_url} refs/heads/master")
+    if rc != 0 or not out.strip():
+        raise SystemExit("获取远端 master SHA 失败: " + (err or out))
+    parent = out.strip().split()[0]
+    print(f"[info] 远端 master: {parent[:8]}")
 
     # 1. 版本自增（仅在 tree 内替换 pubspec.yaml，不写工作区）
     new_ver, pubspec_blob = bump_in_tree(token, owner, repo, args.bump)
@@ -208,88 +208,39 @@ def main():
         raise SystemExit("git push 失败: " + (err or out))
     print(f"[push] 已推送 {commit[:8]} 到 master")
 
-    # 6. 轮询 CI
-    head_sha = commit
+    # 6. 等待云端 CI 构建并把 APK 发布到 GitHub Release
+    #    不依赖 api.github.com：直接轮询 release 下载页（带 token，跨域重定向剥离 Authorization）
+    tag = "v" + new_ver.split("+")[0]
+    dl_url = f"https://{token}@github.com/{owner}/{repo}/releases/download/{tag}/app-release.apk"
     deadline = time.time() + 35 * 60
-    run_id = None
-    for _ in range(20):
-        try:
-            _, data = gh_get(f"/repos/{owner}/{repo}/actions/runs?per_page=10&branch=master", token)
-        except Exception as e:
-            print("[warn] 查询 runs 失败重试:", e)
-            time.sleep(10)
-            continue
-        for rr in data.get("workflow_runs", []):
-            if rr.get("head_sha") == head_sha:
-                run_id = rr["id"]
-                break
-        if run_id:
-            break
-        if time.time() > deadline:
-            break
-        time.sleep(8)
-    if not run_id:
-        _, data = gh_get(f"/repos/{owner}/{repo}/actions/runs?per_page=1&branch=master", token)
-        runs = data.get("workflow_runs", [])
-        run_id = runs[0]["id"] if runs else None
-    if not run_id:
-        raise SystemExit("未找到对应的 CI 运行记录")
-
-    final = None
+    ready = False
     while time.time() < deadline:
         try:
-            _, data = gh_get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", token)
-        except Exception as e:
-            print("[warn] 查询状态失败重试:", e)
-            time.sleep(30)
-            continue
-        status = data.get("status")
-        concl = data.get("conclusion")
-        print(f"[ci] status={status} conclusion={concl}")
-        if status == "completed":
-            final = concl
-            break
-        time.sleep(45)
-    if final != "success":
-        raise SystemExit(f"CI 构建未成功（结论: {final}）")
+            req = urllib.request.Request(dl_url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if r.status == 200:
+                    ready = True
+                    break
+        except Exception:
+            pass
+        time.sleep(20)
+    if not ready:
+        raise SystemExit(f"等待 Release 发布超时（tag={tag}，CI 可能仍在构建或失败）")
+    print(f"[release] {tag} 已发布，APK 可下载")
 
-    # 7. 下载构件
-    _, data = gh_get(f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", token)
-    art = None
-    for a in data.get("artifacts", []):
-        if not a.get("expired"):
-            art = a
-            break
-    if not art:
-        raise SystemExit("未找到可用的构建构件")
-    print(f"[artifact] {art['name']} (id={art['id']})")
-
+    # 7. 下载 APK（github.com Release asset，token 置于 URL 走 Basic Auth；
+    #    302 重定向到 CDN 时 userinfo 不跨域传递，由签名 URL 鉴权，无需额外处理）
     os.makedirs(args.out_dir, exist_ok=True)
-    # 用构件 id 作唯一文件名，避开被系统锁定的旧 _release_artifact.zip
-    zip_path = os.path.join(args.out_dir, f"_release_artifact_{art['id']}.zip")
-    url = f"{API}/repos/{owner}/{repo}/actions/artifacts/{art['id']}/zip"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", "token " + token)
-    req.add_header("Accept", "application/vnd.github+json")
-    print("[download] 开始下载构件 zip ...")
-    opener = urllib.request.build_opener(NoAuthRedirect())
-    with opener.open(req, timeout=600) as resp, open(zip_path, "wb") as f:
+    latest_path = os.path.join(args.out_dir, "app-release.apk")
+    versioned_path = os.path.join(args.out_dir, f"app-release-{new_ver}.apk")
+    print("[download] 开始从 GitHub Release 下载 APK ...")
+    apk_bytes = b""
+    with urllib.request.urlopen(dl_url, timeout=600) as resp:
         while True:
             buf = resp.read(1024 * 1024)
             if not buf:
                 break
-            f.write(buf)
-    print(f"[download] zip 已保存: {zip_path}")
-
-    import zipfile
-    with zipfile.ZipFile(zip_path) as z:
-        apk_entries = [n for n in z.namelist() if n.endswith("app-release.apk")]
-        if not apk_entries:
-            raise SystemExit("构件中未找到 app-release.apk")
-        apk_bytes = z.read(apk_entries[0])
-    latest_path = os.path.join(args.out_dir, "app-release.apk")
-    versioned_path = os.path.join(args.out_dir, f"app-release-{new_ver}.apk")
-    # 带版本号文件始终写出（唯一，不被锁）
+            apk_bytes += buf
     with open(versioned_path, "wb") as f:
         f.write(apk_bytes)
     # 别名文件 app-release.apk 可能被系统锁定无法覆盖，非致命
@@ -298,12 +249,6 @@ def main():
             f.write(apk_bytes)
     except Exception as e:
         print(f"[warn] 无法覆盖别名 app-release.apk（被锁定，可忽略，请用版本化文件名安装）: {e}")
-    # 沙箱环境回收站不可用，删除可能被拦截；非致命，仅提示
-    try:
-        os.remove(zip_path)
-    except Exception as e:
-        print(f"[warn] 无法删除临时 zip（沙箱限制，可忽略）: {e}")
-
     size_mb = len(apk_bytes) / 1024 / 1024
     print("[done] 发布完成：")
     print(json.dumps({
