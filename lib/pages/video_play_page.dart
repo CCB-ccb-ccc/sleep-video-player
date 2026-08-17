@@ -143,6 +143,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _audioReady = false; // 音频服务是否已加载本文件
   // 自定义控制面板：仅由「设置」按钮呼出，默认隐藏
   bool _showControls = false;
+  // 设置模式：点齿轮按钮切换；为 true 时顶部显示一行快捷按钮（状态/续航/播放模式等），否则隐藏
+  bool _settingsExpanded = false;
   bool _isPlaying = true;
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
@@ -591,67 +593,49 @@ class _VideoPlayItemState extends State<VideoPlayItem>
         name.isEmpty ? VideoNameStore.defaultName(widget.model.filePath) : name);
   }
 
-  /// 「设置」按钮：弹出设置窗口，集成定时/状态/续航/名称/播放模式。
+  /// 「设置」按钮：点一下切换“设置模式”，顶部出现一行快捷按钮（仅设置模式时可见）。
   Widget _buildSettingsButton() {
     return IconButton(
-      icon: const Icon(Icons.settings, color: Colors.white),
-      tooltip: '设置',
-      onPressed: _openSettingsSheet,
+      icon: Icon(Icons.settings,
+          color: _settingsExpanded ? Colors.amber : Colors.white),
+      tooltip: _settingsExpanded ? '收起设置' : '设置',
+      onPressed: () => setState(() => _settingsExpanded = !_settingsExpanded),
     );
   }
 
-  void _openSettingsSheet() {
-    setState(() => _showControls = true);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+  /// 设置模式下顶部一行快捷按钮（状态/续航/播放模式 + 定时关闭/视频名称，避免功能丢失）。
+  /// 仅当 _settingsExpanded 为 true 时由 build 渲染，故“不在设置界面时看不到”。
+  Widget _buildSettingsToolbar() {
+    return Positioned(
+      top: 56,
+      left: 8,
+      right: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withAlpha(150),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
-            ListTile(
-              leading: const Icon(Icons.timer, color: Colors.white),
-              title: const Text('定时关闭', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                _pickSleepTimer();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.playlist_play, color: Colors.white),
-              title: const Text('播放模式', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                _pickPlayMode();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.edit_note, color: Colors.white),
-              title: const Text('视频名称', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                _renameCurrent();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.bug_report, color: Colors.white),
-              title: const Text('诊断状态', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                _showStatusDialog();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.battery_charging_full, color: Colors.white),
-              title: const Text('续航白名单', style: TextStyle(color: Colors.white)),
-              onTap: () {
-                Navigator.pop(context);
-                _openBatterySettings();
-              },
-            ),
+            _buildTimerButton(),
+            _buildPlayModeButton(),
+            _buildNameButton(),
+            _buildStatusButton(),
+            _buildBatteryButton(),
           ],
         ),
       ),
+    );
+  }
+
+  /// 视频名称按钮：点击重命名当前视频（默认文件名）。
+  Widget _buildNameButton() {
+    return TextButton.icon(
+      onPressed: _renameCurrent,
+      icon: const Icon(Icons.edit_note, color: Colors.white, size: 20),
+      label: const Text('名称', style: TextStyle(color: Colors.white, fontSize: 12)),
     );
   }
 
@@ -670,14 +654,17 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _playbackIntended = true;
   }
 
-  /// 需求5：单击屏幕 = 暂停/继续（不再作为“显示控制面板”的开关）。
+  /// 单击屏幕：播放中 → 弹出控制面板 + 暂停；已暂停（面板可见）→ 隐藏面板 + 继续播放。
   void _togglePlay() {
     if (_isPlaying) {
+      // 播放中单击：显示控制面板并暂停
+      _showControls = true;
       _pauseAll();
       _autoHideTimer?.cancel();
     } else {
+      // 已暂停时单击：隐藏控制面板并继续播放
+      _showControls = false;
       _playAll();
-      _scheduleAutoHide();
     }
     setState(() {});
   }
@@ -742,7 +729,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       );
     }
     return GestureDetector(
-      // 需求5：单击屏幕暂停/继续
+      // 单击屏幕：播放中→弹出控制面板+暂停；已暂停→隐藏面板+继续播放
       onTap: _togglePlay,
       child: Stack(
         fit: StackFit.expand,
@@ -753,12 +740,16 @@ class _VideoPlayItemState extends State<VideoPlayItem>
           ),
           // 视频名称：竖屏常显；横屏仅进度条（控制面板）显示时显示
           _buildNameOverlay(),
+          // 定时关闭倒计时（顶部中间，设置后常显）
+          if (_sleepMinutes != null) _buildSleepCountdown(),
           // 「设置」按钮（右上角常显）
           Positioned(
             top: 16,
             right: 8,
             child: _buildSettingsButton(),
           ),
+          // 设置模式下顶部一行快捷按钮（仅设置模式可见）
+          if (_settingsExpanded) _buildSettingsToolbar(),
           if (_showControls) _buildControls(),
         ],
       ),
@@ -795,8 +786,38 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     );
   }
 
+  /// 定时关闭倒计时：设置后显示在播放页顶部中间，常显（不依赖控制面板）。
+  Widget _buildSleepCountdown() {
+    return Positioned(
+      top: 16,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.black.withAlpha(150),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.timer, color: Colors.amber, size: 16),
+              const SizedBox(width: 6),
+              Text(
+                _fmtSleep(_sleepRemaining),
+                style: const TextStyle(
+                    color: Colors.amber, fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 自定义控制面板（顶部返回 + 中央播放/暂停 + 底部进度条）。
-  /// 默认隐藏，由「设置」按钮呼出（_showControls=true）。
+  /// 默认隐藏，仅当暂停（_showControls=true）时显示。
   Widget _buildControls() {
     final pos = _curPos();
     final dur = _curDur();
