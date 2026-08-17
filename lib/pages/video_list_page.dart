@@ -176,7 +176,13 @@ class _VideoListPageState extends State<VideoListPage> {
     );
     if (name == null) return;
     await VideoNameStore.setName(video.filePath, name);
-    _snack(name.isEmpty ? '已恢复为默认文件名' : '已重命名');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(name.isEmpty ? '已恢复为默认文件名' : '已重命名'),
+        ),
+      );
+    }
   }
 
   /// 顶部文件夹切换导航栏：全部 + 各文件夹（显示自定义名）

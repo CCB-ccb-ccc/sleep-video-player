@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:android_intent_plus/android_intent.dart';
-import 'package:audio_service/audio_service.dart';
+import 'package:audio_service/audio_service.dart' hide ProcessingState;
+import 'package:just_audio/just_audio.dart';
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -527,7 +528,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       builder: (_) => SimpleDialog(
         title: const Text('播放模式', style: TextStyle(color: Colors.white)),
         backgroundColor: Colors.grey[900],
-        children: const [
+        children: [
           SimpleDialogOption(
             child: Text('手动播放（看完不自动播）', style: TextStyle(color: Colors.white)),
             onPressed: () => Navigator.pop(null, PlayMode.manual),
@@ -768,8 +769,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   /// 竖屏常显；横屏仅进度条（控制面板）显示时显示。
   /// 控制面板显示时左上角有返回按钮，名称下移避免遮挡。
   Widget _buildNameOverlay() {
-    final showInLandscape = _landscape.value && _showControls;
-    final show = !_landscape.value || showInLandscape;
+    final showInLandscape = widget.landscape.value && _showControls;
+    final show = !widget.landscape.value || showInLandscape;
     if (!show) return const SizedBox.shrink();
     final top = _showControls ? 60.0 : 16.0;
     return Positioned(
