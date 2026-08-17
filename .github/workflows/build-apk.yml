@@ -85,10 +85,11 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release and upload APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: Sleep Video Player ${{ steps.ver.outputs.tag }}
-          files: build/app/outputs/flutter-apk/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          # 若 release 已存在（如旧 run 仅建了 tag）则改为追加上传，避免重复创建失败
+          gh release create "$TAG" --title "Sleep Video Player $TAG" --notes "自动发布" "$APK" 2>/dev/null || \
+          gh release upload "$TAG" "$APK" --clobber

@@ -20,6 +20,7 @@
 用法：GITHUB_TOKEN=xxx python tools/release_autopilot_sandbox.py --bump minor
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -211,12 +212,16 @@ def main():
     # 6. 等待云端 CI 构建并把 APK 发布到 GitHub Release
     #    不依赖 api.github.com：直接轮询 release 下载页（带 token，跨域重定向剥离 Authorization）
     tag = "v" + new_ver.split("+")[0]
-    dl_url = f"https://{token}@github.com/{owner}/{repo}/releases/download/{tag}/app-release.apk"
+    # 注意：token 不能内嵌进 URL（该环境下 urllib 对 userinfo 形式 HTTPS 触发 getaddrinfo 失败），
+    # 改用干净 URL + Authorization: Basic 头，302 跳转到 CDN 时 Basic 头不会跨域发送，天然安全。
+    dl_url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/app-release.apk"
+    basic = "Basic " + base64.b64encode((token + ":").encode()).decode()
     deadline = time.time() + 35 * 60
     ready = False
     while time.time() < deadline:
         try:
             req = urllib.request.Request(dl_url, method="HEAD")
+            req.add_header("Authorization", basic)
             with urllib.request.urlopen(req, timeout=30) as r:
                 if r.status == 200:
                     ready = True
@@ -235,7 +240,9 @@ def main():
     versioned_path = os.path.join(args.out_dir, f"app-release-{new_ver}.apk")
     print("[download] 开始从 GitHub Release 下载 APK ...")
     apk_bytes = b""
-    with urllib.request.urlopen(dl_url, timeout=600) as resp:
+    req = urllib.request.Request(dl_url)
+    req.add_header("Authorization", basic)
+    with urllib.request.urlopen(req, timeout=600) as resp:
         while True:
             buf = resp.read(1024 * 1024)
             if not buf:
