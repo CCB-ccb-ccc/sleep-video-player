@@ -198,9 +198,9 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     });
 
     widget.activeIndex.addListener(_onActiveChanged);
-    // 每 1000ms 把静音画面 seek 到音频进度，保持画面与声音同步。
+    // 每 700ms 校验并修复双引擎一致性（音频/画面任一意外停止或漂移都在此纠正）。
     _syncTimer = Timer.periodic(
-        const Duration(milliseconds: 1000), (_) => _syncVideo());
+        const Duration(milliseconds: 700), (_) => _syncVideo());
 
     // 监听音频播放完成：顺序播放 / 单集循环
     _handler?.player.processingStateStream.listen(_onAudioComplete);
@@ -351,14 +351,54 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (_vpc.value.isInitialized) _vpc.seekTo(d);
   }
 
-  /// 静音画面跟随音频进度（容差 1000ms，减少频繁 seek 卡顿）
+  /// 双引擎一致性守护：视频(静音画面)与音频(just_audio)是两套独立解码器，
+  /// 仅靠本方法保持同步。每 ~700ms 运行一次，负责：
+  ///  - 期望播放但音频意外停止（被系统/其他应用抢走焦点等）→ 以画面进度为基准重启音频；
+  ///    若音频彻底不可用则退化为“画面自身出声”，杜绝“有画面无音频”。
+  ///  - 期望播放但画面意外停止 → 续播画面。
+  ///  - 音画漂移超过阈值 → 把“静音画面”拉回音频进度（只动画面，避免音频爆音引起的卡顿观感）。
   void _syncVideo() {
-    if (!_isActive || !_initialized || _handler == null) return;
-    if (!_handler!.player.playing) return;
-    final ap = _handler!.player.position;
+    if (!_isActive || !_initialized) return;
+    // 未期望播放：确保静音画面静止。
+    if (!_playbackIntended) {
+      if (_vpc.value.isInitialized && _vpc.value.isPlaying) _vpc.pause();
+      return;
+    }
+    // 退化路径（无音频服务）：由画面自身出声。
+    if (_handler == null || !_audioReady) {
+      if (_vpc.value.isInitialized) {
+        if (!_vpc.value.isPlaying) _vpc.play();
+        if (_vpc.value.volume < 1) _vpc.setVolume(1);
+      }
+      return;
+    }
+    final audioPlaying = _handler!.player.playing;
+    final audioPos = _handler!.player.position;
+    final dur = _handler!.player.duration ?? Duration.zero;
     final vp = _vpc.value.position;
-    if ((ap - vp).abs() > const Duration(milliseconds: 1000)) {
-      _vpc.seekTo(ap);
+    final videoPlaying = _vpc.value.isInitialized && _vpc.value.isPlaying;
+
+    if (!audioPlaying) {
+      // 音频没在播但期望播放：若接近结尾则交给 _onAudioComplete 处理；
+      // 否则且画面仍在播（即“有画面无音频”）→ 以画面进度为基准重启音频。
+      if (audioPos < dur - const Duration(seconds: 1) && _vpc.value.isInitialized) {
+        try {
+          _handler!.player.seek(vp);
+          _handler!.player.play();
+        } catch (_) {
+          // 音频彻底不可用：退化为画面出声，保证至少有声音。
+          _audioReady = false;
+          _vpc.setVolume(1);
+        }
+      }
+      return;
+    }
+    // 音频在播：保证画面也在播，并把画面拉回音频进度。
+    if (!videoPlaying) {
+      _vpc.seekTo(audioPos);
+      _vpc.play();
+    } else if ((audioPos - vp).abs() > const Duration(milliseconds: 700)) {
+      _vpc.seekTo(audioPos);
     }
   }
 
@@ -679,16 +719,25 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   }
 
   Future<void> _playAll() async {
-    if (_audioReady && _handler != null) await _handler!.player.play();
+    // 1) 先恢复音频（声音主源）。若恢复失败，退化为画面自身出声，避免“有画面无音频”。
+    if (_audioReady && _handler != null) {
+      try {
+        await _handler!.player.play();
+      } catch (_) {
+        _audioReady = false;
+        if (_vpc.value.isInitialized) _vpc.setVolume(1);
+      }
+    }
+    // 2) 恢复静音画面：把画面 seek 到“音频当前进度”再 play()。
+    //    - seek 到当前位置会强制 ExoPlayer 重新解码输出新一帧，刷新纹理，
+    //      修复 pause→resume 后画面停在旧帧、单击续播卡顿的问题；
+    //    - 对齐到音频进度，保证音画同步（不再用 -100ms 回退，避免回退 seek 的卡顿）。
     if (_vpc.value.isInitialized) {
-      // 唤醒画面：双引擎架构下，部分设备 pause→resume 后视频纹理停在暂停帧，
-      // 表现为“单击续播后画面卡顿、需再点一次才流畅”。解决：先 seek 到
-      // “当前进度 -100ms”这一微小新位置（强制 ExoPlayer 解码出新一帧、纹理立即刷新），
-      // 再 play() 续播。向后 100ms 会在 0.1s 内被音频追上，不会造成长期音画错位。
-      final cur = _vpc.value.position;
-      final nudge = cur - const Duration(milliseconds: 100);
-      if (nudge > Duration.zero) await _vpc.seekTo(nudge);
-      _vpc.play();
+      final target = (_audioReady && _handler != null)
+          ? _handler!.player.position
+          : _vpc.value.position;
+      await _vpc.seekTo(target);
+      await _vpc.play();
     }
     _isPlaying = true;
     _playbackIntended = true;
@@ -734,24 +783,20 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       WakelockPlus.enable().catchError((_) {});
       if (_playbackIntended) {
         if (bgEnabled) {
-          // 后台模式回到前台：恢复视频解码（音频本就在播）。
-          // 同样用“回退 100ms seek”强制刷新纹理，避免回到前台后画面卡顿。
+          // 后台模式回到前台：音频本就在播（媒体服务独立于 Activity），
+          // 只需把静音画面 seek 到音频进度并续播，刷新纹理、避免卡顿。
           if (_vpc.value.isInitialized) {
-            final cur = _vpc.value.position;
-            final nudge = cur - const Duration(milliseconds: 100);
-            if (nudge > Duration.zero) _vpc.seekTo(nudge);
+            final target = (_audioReady && _handler != null)
+                ? _handler!.player.position
+                : _vpc.value.position;
+            _vpc.seekTo(target);
             _vpc.play();
           }
         } else {
-          if (_audioReady && _handler != null) _handler!.player.play();
-          if (_vpc.value.isInitialized) {
-            final cur = _vpc.value.position;
-            final nudge = cur - const Duration(milliseconds: 100);
-            if (nudge > Duration.zero) _vpc.seekTo(nudge);
-            _vpc.play();
-          }
-          _isPlaying = true;
+          // 非后台模式：统一用 _playAll 恢复音画（已含纹理刷新逻辑）。
+          _playAll();
         }
+        _isPlaying = true;
       }
       if (mounted) setState(() {});
     }

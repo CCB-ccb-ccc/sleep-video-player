@@ -20,7 +20,6 @@
 用法：GITHUB_TOKEN=xxx python tools/release_autopilot_sandbox.py --bump minor
 """
 import argparse
-import base64
 import json
 import os
 import re
@@ -209,45 +208,61 @@ def main():
         raise SystemExit("git push 失败: " + (err or out))
     print(f"[push] 已推送 {commit[:8]} 到 master")
 
-    # 6. 等待云端 CI 构建并把 APK 发布到 GitHub Release
-    #    不依赖 api.github.com：直接轮询 release 下载页（带 token，跨域重定向剥离 Authorization）
+    # 6. 轮询 CI（api.github.com，已验证可用）
     tag = "v" + new_ver.split("+")[0]
-    # 注意：token 不能内嵌进 URL（该环境下 urllib 对 userinfo 形式 HTTPS 触发 getaddrinfo 失败），
-    # 改用干净 URL + Authorization: Basic 头，302 跳转到 CDN 时 Basic 头不会跨域发送，天然安全。
-    dl_url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/app-release.apk"
-    basic = "Basic " + base64.b64encode((token + ":").encode()).decode()
     deadline = time.time() + 35 * 60
-    ready = False
+    run_id = None
+    final = None
     while time.time() < deadline:
         try:
-            req = urllib.request.Request(dl_url, method="HEAD")
-            req.add_header("Authorization", basic)
-            with urllib.request.urlopen(req, timeout=30) as r:
-                if r.status == 200:
-                    ready = True
+            _, data = gh_get(f"/repos/{owner}/{repo}/actions/runs?per_page=20", token)
+            for rr in data.get("workflow_runs", []):
+                if rr.get("head_sha") == commit:
+                    run_id = rr["id"]
                     break
-        except Exception:
-            pass
-        time.sleep(20)
-    if not ready:
-        raise SystemExit(f"等待 Release 发布超时（tag={tag}，CI 可能仍在构建或失败）")
-    print(f"[release] {tag} 已发布，APK 可下载")
+            if run_id:
+                _, rd = gh_get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", token)
+                st = rd.get("status")
+                concl = rd.get("conclusion")
+                print(f"[ci] status={st} conclusion={concl}")
+                if st == "completed":
+                    final = concl
+                    break
+        except Exception as e:
+            print("[warn] 查询 CI 失败重试:", e)
+        time.sleep(30)
+    if final != "success":
+        raise SystemExit(f"CI 构建未成功（结论: {final}）")
+    print(f"[ci] 构建成功，开始获取 Release 资产")
 
-    # 7. 下载 APK（github.com Release asset，token 置于 URL 走 Basic Auth；
-    #    302 重定向到 CDN 时 userinfo 不跨域传递，由签名 URL 鉴权，无需额外处理）
+    # 7. 下载 APK（api.github.com 资产端点，octet-stream；带重试应对抖动链路）
     os.makedirs(args.out_dir, exist_ok=True)
-    latest_path = os.path.join(args.out_dir, "app-release.apk")
     versioned_path = os.path.join(args.out_dir, f"app-release-{new_ver}.apk")
-    print("[download] 开始从 GitHub Release 下载 APK ...")
+    latest_path = os.path.join(args.out_dir, "app-release.apk")
+    _, rel = gh_get(f"/repos/{owner}/{repo}/releases/tags/{tag}", token)
+    asset_id = None
+    for a in rel.get("assets", []):
+        if a["name"].endswith("app-release.apk"):
+            asset_id = a["id"]
+            break
+    if not asset_id:
+        raise SystemExit("未找到 Release 资产")
+    asset_url = f"{API}/repos/{owner}/{repo}/releases/assets/{asset_id}"
     apk_bytes = b""
-    req = urllib.request.Request(dl_url)
-    req.add_header("Authorization", basic)
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        while True:
-            buf = resp.read(1024 * 1024)
-            if not buf:
-                break
-            apk_bytes += buf
+    for attempt in range(1, 6):
+        try:
+            req = urllib.request.Request(asset_url)
+            req.add_header("Authorization", "token " + token)
+            req.add_header("Accept", "application/octet-stream")
+            req.add_header("User-Agent", "workbuddy-dl")
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                apk_bytes = resp.read()
+            break
+        except Exception as e:
+            print(f"[warn] 下载尝试 {attempt} 失败: {e}")
+            time.sleep(5)
+    if not apk_bytes:
+        raise SystemExit("APK 下载失败")
     with open(versioned_path, "wb") as f:
         f.write(apk_bytes)
     # 别名文件 app-release.apk 可能被系统锁定无法覆盖，非致命
