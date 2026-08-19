@@ -743,15 +743,22 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _playbackIntended = true;
   }
 
-  /// 单击屏幕：播放中 → 弹出控制面板 + 暂停；已暂停（面板可见）→ 隐藏面板 + 继续播放。
+  /// 单击屏幕：仅切换控制面板（进度条/按钮）的显隐，不再触发暂停/播放，
+  /// 避免用户误触导致频繁 pause→resume 引发的画面卡顿。
+  void _onSingleTap() {
+    if (!mounted) return;
+    setState(() => _showControls = !_showControls);
+  }
+
+  /// 双击屏幕：播放中 → 弹出控制面板 + 暂停；已暂停（面板可见）→ 隐藏面板 + 继续播放。
   void _togglePlay() {
     if (_isPlaying) {
-      // 播放中单击：显示控制面板并暂停
+      // 播放中双击：显示控制面板并暂停
       _showControls = true;
       _pauseAll();
       _autoHideTimer?.cancel();
     } else {
-      // 已暂停时单击：隐藏控制面板并继续播放
+      // 已暂停时双击：隐藏控制面板并继续播放
       _showControls = false;
       _playAll();
     }
@@ -828,8 +835,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       );
     }
     return GestureDetector(
-      // 单击屏幕：播放中→弹出控制面板+暂停；已暂停→隐藏面板+继续播放
-      onTap: _togglePlay,
+      // 单击屏幕：仅切换控制面板显隐（不再触发暂停/播放，避免误触导致画面卡顿）
+      onTap: _onSingleTap,
+      // 双击屏幕：切换播放/暂停（用户明确要求，避免误触）
+      onDoubleTap: _togglePlay,
       child: Stack(
         fit: StackFit.expand,
         children: [
