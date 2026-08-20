@@ -71,6 +71,16 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release
 
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Package debug APK as zip (tester artifact)
+        run: |
+          cd build/app/outputs/flutter-apk
+          rm -f app-debug.zip
+          zip -r app-debug.zip app-debug.apk
+          ls -la app-debug.zip
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -84,12 +94,13 @@ jobs:
           TAG="v${RAW%%+*}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release and upload APK
+      - name: Create GitHub Release and upload APKs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           APK=build/app/outputs/flutter-apk/app-release.apk
+          DBG=build/app/outputs/flutter-apk/app-debug.zip
           # 若 release 已存在（如旧 run 仅建了 tag）则改为追加上传，避免重复创建失败
-          gh release create "$TAG" --title "Sleep Video Player $TAG" --notes "自动发布" "$APK" 2>/dev/null || \
-          gh release upload "$TAG" "$APK" --clobber
+          gh release create "$TAG" --title "Sleep Video Player $TAG" --notes "自动发布" "$APK" "$DBG" 2>/dev/null || \
+          gh release upload "$TAG" "$APK" "$DBG" --clobber
