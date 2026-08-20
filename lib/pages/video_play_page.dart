@@ -148,6 +148,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
   Timer? _syncTimer; // 静音画面与音频进度对齐
+  DateTime? _syncGraceUntil; // 恢复播放后的“同步宽限期”：期间不纠正漂移，避免反复 seek 卡顿
   // 定时关闭到期时由全局 SleepTimer 调用，暂停当前激活页的音视频
   late final VoidCallback _onTimerExpire;
   AudioPlayerHandler? _handler;
@@ -393,11 +394,24 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       }
       return;
     }
-    // 音频在播：保证画面也在播，并把画面拉回音频进度。
+    // 音频在播：保证画面也在播。
     if (!videoPlaying) {
-      _vpc.seekTo(audioPos);
-      _vpc.play();
-    } else if ((audioPos - vp).abs() > const Duration(milliseconds: 700)) {
+      // 画面彻底停了：恢复播放（对齐到音频进度）。
+      if (_vpc.value.isInitialized) {
+        _vpc.seekTo(audioPos);
+        _vpc.play();
+      }
+      return;
+    }
+    // 画面在播：进入对齐逻辑。
+    // 刚恢复播放的 3s 宽限期内，画面正在重新缓冲追赶进度，
+    // 严禁反复 seek（否则不断打断解码 → 卡顿），仅保持播放即可。
+    final inGrace =
+        _syncGraceUntil != null && DateTime.now().isBefore(_syncGraceUntil!);
+    if (inGrace) return;
+    // 宽限期后：仅当“音频明显领先画面 > 1.5s”时用「向前 seek」把画面拉回
+    // （向前 seek 速度快、不爆音）；画面领先音频时不回退，避免回退 seek 卡顿。
+    if (audioPos - vp > const Duration(milliseconds: 1500)) {
       _vpc.seekTo(audioPos);
     }
   }
@@ -719,6 +733,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   }
 
   Future<void> _playAll() async {
+    _playbackIntended = true; // 立即标记：避免同步看门狗在异步恢复期间误把画面暂停
     // 1) 先恢复音频（声音主源）。若恢复失败，退化为画面自身出声，避免“有画面无音频”。
     if (_audioReady && _handler != null) {
       try {
@@ -739,8 +754,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       await _vpc.seekTo(target);
       await _vpc.play();
     }
+    // 3) 设置“同步宽限期”：接下来 3s 内 _syncVideo 不再纠正漂移，
+    //    让画面安心缓冲追赶音频，避免出现“音频正常、画面却一直被反复 seek 卡死”的怪圈。
+    _syncGraceUntil = DateTime.now().add(const Duration(milliseconds: 3000));
     _isPlaying = true;
-    _playbackIntended = true;
   }
 
   /// 单击屏幕：仅切换控制面板（进度条/按钮）的显隐，不再触发暂停/播放，
