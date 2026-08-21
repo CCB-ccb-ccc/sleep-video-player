@@ -148,7 +148,16 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
   Timer? _syncTimer; // 静音画面与音频进度对齐
-  DateTime? _syncGraceUntil; // 恢复播放后的“同步宽限期”：期间不纠正漂移，避免反复 seek 卡顿
+  DateTime? _syncGraceUntil; // 恢复播放后的"同步宽限期"：期间不纠正漂移，避免反复 seek 卡顿
+  // ===== 自定义单击/双击检测 =====
+  // Flutter 内置 onTap+onDoubleTap 的双击窗口过严（仅 300ms 且要求两次均为"干净点按"，
+  // 躺着握机时手指轻微位移会被判为两次单击，导致"点四下才暂停"）。改为自实现：
+  // 时间窗口放宽到 350ms、允许两次点击位置偏移、单击仅在窗口结束后才触发，避免误判。
+  DateTime? _lastTapTime;
+  Offset? _lastTapPos;
+  Timer? _singleTapTimer;
+  static const Duration _doubleTapWindow = Duration(milliseconds: 350);
+  static const double _doubleTapSlop = 100.0; // 第二次点击允许的最大位移(px)
   // 定时关闭到期时由全局 SleepTimer 调用，暂停当前激活页的音视频
   late final VoidCallback _onTimerExpire;
   AudioPlayerHandler? _handler;
@@ -760,6 +769,42 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _isPlaying = true;
   }
 
+  /// 单击/双击统一入口：在 onTapDown 处判断。
+  /// - 与上次点按间隔 ≤ 350ms 且位移 ≤ 100px → 判定双击 → 切换播放/暂停；
+  /// - 否则记录本次点按并启动 350ms 计时器，窗口内无第二次点按才触发"单击=切面板"。
+  void _handleTapDown(TapDownDetails d) {
+    final now = DateTime.now();
+    final isDouble = _lastTapTime != null &&
+        now.difference(_lastTapTime!) <= _doubleTapWindow &&
+        _lastTapPos != null &&
+        (d.localPosition - _lastTapPos!).distance <= _doubleTapSlop;
+    if (isDouble) {
+      _singleTapTimer?.cancel();
+      _singleTapTimer = null;
+      _lastTapTime = null;
+      _lastTapPos = null;
+      _togglePlay();
+    } else {
+      _lastTapTime = now;
+      _lastTapPos = d.localPosition;
+      _singleTapTimer?.cancel();
+      _singleTapTimer = Timer(_doubleTapWindow, () {
+        _onSingleTap();
+        _lastTapTime = null;
+        _lastTapPos = null;
+      });
+    }
+  }
+
+  /// 拖动/翻页（手指位移超过 slop）会触发 onTapCancel：取消待触发的单击，
+  /// 避免滑动被误判为"单击切面板"或破坏双击计时。
+  void _handleTapCancel() {
+    _singleTapTimer?.cancel();
+    _singleTapTimer = null;
+    _lastTapTime = null;
+    _lastTapPos = null;
+  }
+
   /// 单击屏幕：仅切换控制面板（进度条/按钮）的显隐，不再触发暂停/播放，
   /// 避免用户误触导致频繁 pause→resume 引发的画面卡顿。
   void _onSingleTap() {
@@ -830,6 +875,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   void dispose() {
     _autoHideTimer?.cancel();
     _syncTimer?.cancel();
+    _singleTapTimer?.cancel();
     // 若本页仍是定时关闭的回调持有者，则解绑（避免回调悬空）
     if (SleepTimer.instance.onExpire == _onTimerExpire) {
       SleepTimer.instance.onExpire = null;
@@ -852,10 +898,10 @@ class _VideoPlayItemState extends State<VideoPlayItem>
       );
     }
     return GestureDetector(
-      // 单击屏幕：仅切换控制面板显隐（不再触发暂停/播放，避免误触导致画面卡顿）
-      onTap: _onSingleTap,
-      // 双击屏幕：切换播放/暂停（用户明确要求，避免误触）
-      onDoubleTap: _togglePlay,
+      // 自实现单击/双击：onTapDown 捕获每次点按时间与位置，对时间/位移更宽容，
+      // 单击（切面板）延迟到双击窗口结束后才触发，避免把双击误判成两次单击。
+      onTapDown: _handleTapDown,
+      onTapCancel: _handleTapCancel,
       child: Stack(
         fit: StackFit.expand,
         children: [
