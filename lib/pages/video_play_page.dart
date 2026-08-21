@@ -110,8 +110,10 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
 
 /// 单个视频播放项。
 ///
-/// 设计：video_player 仅渲染“静音画面”，声音统一由音频服务（just_audio）播放。
-/// 后台播放开关来自全局设置（AppSettings），用户一旦在“设置页”开启即持久生效。
+/// 设计（重构后）：前台用 video_player 单引擎音画一体（声音+画面同源，无需对表看门狗，
+/// 彻底消除双引擎同步卡顿）；后台播放开关来自全局设置（AppSettings），开启时仅在“切后台”
+/// 那一刻把音频一次性交给 audio_service（just_audio）续播，前台恢复时再交回 video_player。
+/// 即：前台单引擎、后台只用音频，二者按生命周期切换，互不长期并行。
 class VideoPlayItem extends StatefulWidget {
   final LocalVideoModel model;
   final int index;
@@ -147,8 +149,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _isPlaying = true;
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
-  Timer? _syncTimer; // 静音画面与音频进度对齐
-  DateTime? _syncGraceUntil; // 恢复播放后的"同步宽限期"：期间不纠正漂移，避免反复 seek 卡顿
+  bool _isBackground = false; // 当前是否处于后台（熄屏/切后台），用于前台/后台播放源切换
   // ===== 自定义单击/双击检测 =====
   // Flutter 内置 onTap+onDoubleTap 的双击窗口过严（仅 300ms 且要求两次均为"干净点按"，
   // 躺着握机时手指轻微位移会被判为两次单击，导致"点四下才暂停"）。改为自实现：
@@ -191,7 +192,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _vpc.addListener(_onVideoChanged);
     _vpc.initialize().then((_) {
       if (!mounted) return;
-      _vpc.setVolume(0); // 视频仅作画面，声音统一由音频服务播放
+      _vpc.setVolume(1); // 前台单引擎：video_player 自身出声（音画一体）
       _chewieController = ChewieController(
         videoPlayerController: _vpc,
         autoPlay: false,
@@ -208,11 +209,8 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     });
 
     widget.activeIndex.addListener(_onActiveChanged);
-    // 每 700ms 校验并修复双引擎一致性（音频/画面任一意外停止或漂移都在此纠正）。
-    _syncTimer = Timer.periodic(
-        const Duration(milliseconds: 700), (_) => _syncVideo());
 
-    // 监听音频播放完成：顺序播放 / 单集循环
+    // 监听音频播放完成：后台音频（just_audio）播放完毕时驱动顺序/循环（前台完成由 _onVideoChanged 处理）
     _handler?.player.processingStateStream.listen(_onAudioComplete);
   }
 
@@ -240,25 +238,40 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     }
   }
 
-  /// 音频播放完成事件：根据播放模式决定下一步。
+  /// 后台音频（just_audio）播放完成事件：根据播放模式决定下一步。
+  /// 前台完成由 _onVideoChanged 监测 video_player 的 isCompleted 触发，二者不重复。
   void _onAudioComplete(ProcessingState state) {
     if (state != ProcessingState.completed) return;
     if (!_isActive || !_audioReady) return;
-    diag('audio completed 播放模式=${AppSettings.instance.playMode.name}');
+    _handleComplete();
+  }
+
+  /// 前台 video_player 播放完成（单引擎，无 just_audio 完成事件）。
+  void _onVideoCompleted() {
+    if (!_isActive || !_playbackIntended) return;
+    _handleComplete();
+  }
+
+  /// 播放完成后的统一后继逻辑：顺序 / 单集循环 / 手动。
+  void _handleComplete() {
+    diag('completed 播放模式=${AppSettings.instance.playMode.name}');
     switch (AppSettings.instance.playMode) {
       case PlayMode.sequence:
         _playNext();
         break;
       case PlayMode.loopOne:
-        _handler?.player.seek(Duration.zero);
-        _handler?.player.play();
-        _vpc.seekTo(Duration.zero);
-        _vpc.play();
+        if (_isBackground) {
+          _handler?.player.seek(Duration.zero);
+          _handler?.player.play();
+        } else {
+          _vpc.seekTo(Duration.zero);
+          _vpc.play();
+        }
         break;
       case PlayMode.manual:
       default:
-        // 手动模式：停止（视频也停下）
-        if (_vpc.value.isInitialized) _vpc.pause();
+        // 手动模式：停止（视频/音频均停下）
+        _pauseAll();
         break;
     }
   }
@@ -286,53 +299,45 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     // 翻页后新一集成为激活项，_onActiveChanged 会自动激活并播放。
   }
 
-  /// 成为激活项：加载音频到音频服务并开始播放（视频静音同步）。
+  /// 成为激活项。
+  /// 前台：video_player 单引擎音画一体（声音由 video_player 自身出声，just_audio 仅“待命”不抢声）。
+  /// 后台（如后台顺序播放切到下一集）：直接用 just_audio 续播音频。
   Future<void> _activate() async {
     if (!_initialized) return;
     // 成为激活页：接管“定时关闭到期”的暂停回调
     SleepTimer.instance.onExpire = _onTimerExpire;
-    diag('activate: isActive=$_isActive');
     final handler = globalAudioHandler.value;
     _handler = handler;
-    diag('activate: handler=${handler?.runtimeType ?? 'null'}');
-    if (handler == null) {
-      // 退化路径：直接用 video_player 出声（前台可用，后台不续播）
-      diag('activate: handler=null -> 退化 video 出声(仅前台)');
-      _audioReady = false;
-      _vpc.setVolume(1);
-      if (_playbackIntended && _vpc.value.isInitialized) _vpc.play();
-      if (mounted) {
-        setState(() {
-          _isPlaying = _playbackIntended;
-          _showControls = false;
-        });
+    // 预载音频到 audio_service（仅“待命”，不播放），供切后台时一次性交接。
+    if (handler != null) {
+      try {
+        await handler.loadFile(widget.model.filePath);
+        _audioReady = true;
+      } catch (_) {
+        _audioReady = false;
       }
+    }
+    if (!_playbackIntended) {
+      if (mounted) setState(() => _isPlaying = false);
       return;
     }
-    try {
-      await handler.loadFile(widget.model.filePath);
-      _audioReady = true;
-      _vpc.setVolume(0); // 正常：声音走音频服务
-      diag('activate: 音频服务加载成功, 走音频路径');
-      if (_vpc.value.isInitialized) {
-        await handler.player.seek(_vpc.value.position);
+    if (_isBackground && AppSettings.instance.backgroundPlay) {
+      // 后台激活：直接用 just_audio 续播音频（无画面）
+      if (_audioReady && _handler != null) {
+        try {
+          _handler!.player.seek(Duration.zero);
+          _handler!.player.play();
+        } catch (_) {}
       }
-    } catch (_) {
-      diag('activate: 音频加载失败 -> 退化 video 出声');
-      _audioReady = false;
-      _vpc.setVolume(1);
+    } else {
+      // 前台：单引擎，video_player 音画一体。确保 just_audio 静默，避免双声。
+      if (_vpc.value.isInitialized) {
+        await _handler?.player.pause();
+        _vpc.setVolume(1);
+        _vpc.play();
+      }
     }
-    if (!mounted) return;
-    if (_playbackIntended) {
-      if (_audioReady) handler.player.play();
-      if (_vpc.value.isInitialized) _vpc.play();
-    }
-    if (mounted) {
-      setState(() {
-        _isPlaying = _playbackIntended;
-        _showControls = false;
-      });
-    }
+    if (mounted) setState(() => _isPlaying = _playbackIntended);
   }
 
   /// 离开激活：暂停本项视频解码（音频由新的激活项接管）
@@ -341,89 +346,40 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   }
 
   void _onVideoChanged() {
+    // 前台单引擎：video_player 播放完毕（isCompleted）时驱动后继逻辑（后台由 just_audio 事件处理）。
+    if (_vpc.value.isCompleted &&
+        _isActive &&
+        _playbackIntended &&
+        !_isBackground) {
+      _onVideoCompleted();
+    }
     if (mounted && _showControls) setState(() {});
   }
 
   Duration _curPos() {
-    if (_audioReady && _handler != null) return _handler!.player.position;
+    // 后台用 just_audio 进度；前台用 video_player 进度（单引擎音画同源）。
+    if (_isBackground && _audioReady && _handler != null) {
+      return _handler!.player.position;
+    }
     return _vpc.value.isInitialized ? _vpc.value.position : Duration.zero;
   }
 
   Duration _curDur() {
-    if (_audioReady && _handler != null) {
+    if (_isBackground && _audioReady && _handler != null) {
       return _handler!.player.duration ?? Duration.zero;
     }
     return _vpc.value.isInitialized ? _vpc.value.duration : Duration.zero;
   }
 
   Future<void> _seekTo(Duration d) async {
-    if (_audioReady && _handler != null) await _handler!.player.seek(d);
+    if (_isBackground && _audioReady && _handler != null) {
+      await _handler!.player.seek(d);
+    }
     if (_vpc.value.isInitialized) _vpc.seekTo(d);
   }
 
-  /// 双引擎一致性守护：视频(静音画面)与音频(just_audio)是两套独立解码器，
-  /// 仅靠本方法保持同步。每 ~700ms 运行一次，负责：
-  ///  - 期望播放但音频意外停止（被系统/其他应用抢走焦点等）→ 以画面进度为基准重启音频；
-  ///    若音频彻底不可用则退化为“画面自身出声”，杜绝“有画面无音频”。
-  ///  - 期望播放但画面意外停止 → 续播画面。
-  ///  - 音画漂移超过阈值 → 把“静音画面”拉回音频进度（只动画面，避免音频爆音引起的卡顿观感）。
-  void _syncVideo() {
-    if (!_isActive || !_initialized) return;
-    // 未期望播放：确保静音画面静止。
-    if (!_playbackIntended) {
-      if (_vpc.value.isInitialized && _vpc.value.isPlaying) _vpc.pause();
-      return;
-    }
-    // 退化路径（无音频服务）：由画面自身出声。
-    if (_handler == null || !_audioReady) {
-      if (_vpc.value.isInitialized) {
-        if (!_vpc.value.isPlaying) _vpc.play();
-        if (_vpc.value.volume < 1) _vpc.setVolume(1);
-      }
-      return;
-    }
-    final audioPlaying = _handler!.player.playing;
-    final audioPos = _handler!.player.position;
-    final dur = _handler!.player.duration ?? Duration.zero;
-    final vp = _vpc.value.position;
-    final videoPlaying = _vpc.value.isInitialized && _vpc.value.isPlaying;
-
-    if (!audioPlaying) {
-      // 音频没在播但期望播放：若接近结尾则交给 _onAudioComplete 处理；
-      // 否则且画面仍在播（即“有画面无音频”）→ 以画面进度为基准重启音频。
-      if (audioPos < dur - const Duration(seconds: 1) && _vpc.value.isInitialized) {
-        try {
-          _handler!.player.seek(vp);
-          _handler!.player.play();
-        } catch (_) {
-          // 音频彻底不可用：退化为画面出声，保证至少有声音。
-          _audioReady = false;
-          _vpc.setVolume(1);
-        }
-      }
-      return;
-    }
-    // 音频在播：保证画面也在播。
-    if (!videoPlaying) {
-      // 画面彻底停了：恢复播放（对齐到音频进度）。
-      if (_vpc.value.isInitialized) {
-        _vpc.seekTo(audioPos);
-        _vpc.play();
-      }
-      return;
-    }
-    // 画面在播：进入对齐逻辑。
-    // 刚恢复播放的 3s 宽限期内，画面正在重新缓冲追赶进度，
-    // 严禁反复 seek（否则不断打断解码 → 卡顿），仅保持播放即可。
-    final inGrace =
-        _syncGraceUntil != null && DateTime.now().isBefore(_syncGraceUntil!);
-    if (inGrace) return;
-    // 宽限期后：仅当“音频明显领先画面 > 1.5s”时用「向前 seek」把画面拉回
-    // （向前 seek 速度快、不爆音）；画面领先音频时不回退，避免回退 seek 卡顿。
-    if (audioPos - vp > const Duration(milliseconds: 1500)) {
-      _vpc.seekTo(audioPos);
-    }
-  }
+  // 注：原“双引擎同步看门狗 _syncVideo”已移除——重构后前台由 video_player 单引擎音画同源，
+  // 后台只用 just_audio 出声，不再需要周期性对表，前台卡顿根因随之消除。
 
   void _scheduleAutoHide() {
     _autoHideTimer?.cancel();
@@ -733,39 +689,21 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     );
   }
 
-  // ===== 播放/暂停：控制音频服务（声音）+ 静音视频 =====
+  // ===== 播放/暂停（前台单引擎：video_player 音画一体） =====
   Future<void> _pauseAll() async {
-    await _handler?.player.pause();
+    await _handler?.player.pause(); // 仅后台音频在播时需要；前台 just_audio 本就静默
     if (_vpc.value.isInitialized) _vpc.pause();
     _isPlaying = false;
     _playbackIntended = false;
   }
 
   Future<void> _playAll() async {
-    _playbackIntended = true; // 立即标记：避免同步看门狗在异步恢复期间误把画面暂停
-    // 1) 先恢复音频（声音主源）。若恢复失败，退化为画面自身出声，避免“有画面无音频”。
-    if (_audioReady && _handler != null) {
-      try {
-        await _handler!.player.play();
-      } catch (_) {
-        _audioReady = false;
-        if (_vpc.value.isInitialized) _vpc.setVolume(1);
-      }
-    }
-    // 2) 恢复静音画面：把画面 seek 到“音频当前进度”再 play()。
-    //    - seek 到当前位置会强制 ExoPlayer 重新解码输出新一帧，刷新纹理，
-    //      修复 pause→resume 后画面停在旧帧、单击续播卡顿的问题；
-    //    - 对齐到音频进度，保证音画同步（不再用 -100ms 回退，避免回退 seek 的卡顿）。
+    _playbackIntended = true; // 立即标记：异步恢复期间保持“期望播放”
+    // 前台恢复：单引擎，video_player 音画一体，无需任何对表/宽限期。
     if (_vpc.value.isInitialized) {
-      final target = (_audioReady && _handler != null)
-          ? _handler!.player.position
-          : _vpc.value.position;
-      await _vpc.seekTo(target);
+      _vpc.setVolume(1);
       await _vpc.play();
     }
-    // 3) 设置“同步宽限期”：接下来 3s 内 _syncVideo 不再纠正漂移，
-    //    让画面安心缓冲追赶音频，避免出现“音频正常、画面却一直被反复 seek 卡死”的怪圈。
-    _syncGraceUntil = DateTime.now().add(const Duration(milliseconds: 3000));
     _isPlaying = true;
   }
 
@@ -833,36 +771,50 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       WakelockPlus.disable().catchError((_) {});
+      _isBackground = true;
+      if (!_isActive) return; // 仅激活项负责音频交接；其余项本就暂停，无需处理
       if (!_playbackIntended) {
         // 用户已手动暂停：离开前台也保持暂停，绝不能强行续播音频/视频。
-        // 修复：暂停后息屏，视频又自动开始播放。
         return;
       }
       if (bgEnabled) {
-        // 后台播放开启且用户希望播放：音频服务继续；仅暂停视频解码省电。
-        if (_audioReady && _handler != null) {
-          _handler!.player.play();
-        }
+        // 交接：暂停静音画面，把音频一次性交给 just_audio 从当前进度续播（屏幕熄灭后仍有声）。
+        final pos = _vpc.value.isInitialized ? _vpc.value.position : Duration.zero;
         if (_vpc.value.isInitialized) _vpc.pause();
+        if (_audioReady && _handler != null) {
+          try {
+            _handler!.player.seek(pos);
+            _handler!.player.play();
+          } catch (_) {
+            _audioReady = false;
+          }
+        }
       } else {
         // 未开启后台播放：离开前台即整体暂停
         _pauseAll();
       }
     } else if (state == AppLifecycleState.resumed) {
       WakelockPlus.enable().catchError((_) {});
+      _isBackground = false;
+      if (!_isActive) return; // 仅激活项负责恢复；其余项保持暂停
       if (_playbackIntended) {
         if (bgEnabled) {
-          // 后台模式回到前台：音频本就在播（媒体服务独立于 Activity），
-          // 只需把静音画面 seek 到音频进度并续播，刷新纹理、避免卡顿。
+          // 后台→前台：暂停 just_audio，画面回到音频进度续播（前台单引擎音画一体）。
+          if (_audioReady && _handler != null) {
+            try {
+              _handler!.player.pause();
+            } catch (_) {}
+          }
           if (_vpc.value.isInitialized) {
             final target = (_audioReady && _handler != null)
                 ? _handler!.player.position
                 : _vpc.value.position;
+            _vpc.setVolume(1);
             _vpc.seekTo(target);
             _vpc.play();
           }
         } else {
-          // 非后台模式：统一用 _playAll 恢复音画（已含纹理刷新逻辑）。
+          // 非后台模式：统一用 _playAll 恢复音画。
           _playAll();
         }
         _isPlaying = true;
@@ -874,7 +826,6 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   @override
   void dispose() {
     _autoHideTimer?.cancel();
-    _syncTimer?.cancel();
     _singleTapTimer?.cancel();
     // 若本页仍是定时关闭的回调持有者，则解绑（避免回调悬空）
     if (SleepTimer.instance.onExpire == _onTimerExpire) {
