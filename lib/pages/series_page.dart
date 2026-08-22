@@ -19,6 +19,9 @@ import '../widgets/video_grid_item.dart';
 class SeriesPage extends StatefulWidget {
   const SeriesPage({super.key});
 
+  // 由首页在切到「追剧」tab 时调用，触发续播弹窗（避免冷启动时未可见就弹窗）。
+  static VoidCallback? onResumeRequested;
+
   @override
   State<SeriesPage> createState() => _SeriesPageState();
 }
@@ -40,13 +43,11 @@ class _SeriesPageState extends State<SeriesPage> {
 
   // 每个 App 会话仅提示一次续播弹窗
   static bool _resumePromptShown = false;
-  // 由首页在切到「追剧」tab 时调用，触发续播弹窗（避免冷启动时未可见就弹窗）。
-  static VoidCallback? onResumeRequested;
 
   @override
   void initState() {
     super.initState();
-    onResumeRequested = _promptResume; // 同步注册，确保点击追剧 tab 即可触发
+    SeriesPage.onResumeRequested = _promptResume; // 同步注册，确保点击追剧 tab 即可触发
     _init();
   }
 
