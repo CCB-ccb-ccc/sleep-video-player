@@ -24,10 +24,12 @@ class SeasonData {
   final String path; // 季文件夹完整路径
   final String name; // 季名（自定义名或文件夹名）
   final List<LocalVideoModel> episodes; // 该季下的视频（按文件名数字升序）
+  final int episodeCount; // 集数（轻量扫描时 episodes 可能为空，用此字段显示集数）
 
   SeasonData({
     required this.path,
     required this.name,
     required this.episodes,
-  });
+    int? episodeCount,
+  }) : episodeCount = episodeCount ?? episodes.length;
 }

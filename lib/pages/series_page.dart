@@ -36,6 +36,7 @@ class _SeriesPageState extends State<SeriesPage> {
 
   Map<String, Future<String?>> _coverFutures = {};
   Map<String, Future<int>> _seasonCountFutures = {};
+  Map<String, Future<String?>> _seasonCoverFutures = {};
   LastWatched? _lastWatched;
 
   Map<String, String> _epNames = {};
@@ -129,10 +130,18 @@ class _SeriesPageState extends State<SeriesPage> {
 
   Future<void> _enterSeries(SeriesEntry entry) async {
     setState(() => _loading = true);
-    final data = await SeriesScanUtils.scanSeries(entry.path);
+    // 轻量扫描：只列子文件夹（季）+ 集数，不生成缩略图/读时长，进入季列表极快。
+    final data = await SeriesScanUtils.listSeasonsLight(entry.path);
+    if (!mounted) return;
+    // 季封面异步懒加载（只取每季首集，不阻塞进入季列表）。
+    final covers = <String, Future<String?>>{};
+    for (final s in data.seasons) {
+      covers[s.path] = SeriesScanUtils.seasonCoverPath(s.path);
+    }
     if (!mounted) return;
     setState(() {
       _series = data;
+      _seasonCoverFutures = covers;
       _season = null;
       _level = 1;
       _loading = false;
@@ -140,15 +149,20 @@ class _SeriesPageState extends State<SeriesPage> {
   }
 
   Future<void> _enterSeason(SeasonData season) async {
-    final paths = season.episodes.map((e) => e.filePath).toList();
-    final names = await VideoNameStore.getAll(paths);
+    setState(() => _loading = true);
+    // 只扫描所点击的这一季（轻量模式进季列表时 episodes 为空，需在此补全）。
+    final data = await SeriesScanUtils.scanSeason(season.path);
+    if (!mounted) return;
+    final names = await VideoNameStore.getAll(
+        data.episodes.map((e) => e.filePath).toList());
     final prog = await SeriesHistoryStore.getAllProgress();
     if (!mounted) return;
     setState(() {
-      _season = season;
+      _season = data;
       _epNames = names;
       _epProgress = prog;
       _level = 2;
+      _loading = false;
     });
   }
 
@@ -265,13 +279,26 @@ class _SeriesPageState extends State<SeriesPage> {
     final name = await _textDialog('自定义季名', season.name);
     if (name == null) return;
     await SeriesStore.setSeasonLabel(season.path, name);
-    // 刷新季名
+    // 直接更新内存中的季名，立即生效（不依赖重新扫描整部剧，避免卡顿与读取不到的风险）。
     if (_series != null) {
-      final refreshed = await SeriesScanUtils.scanSeries(_series!.path);
+      final next = _series!.seasons
+          .map((s) => s.path == season.path
+              ? SeasonData(
+                  path: s.path,
+                  name: name,
+                  episodes: s.episodes,
+                  episodeCount: s.episodeCount,
+                )
+              : s)
+          .toList();
       if (mounted) {
         setState(() {
-          _series = refreshed;
-          _season = refreshed.seasons
+          _series = SeriesData(
+            path: _series!.path,
+            name: _series!.name,
+            seasons: next,
+          );
+          _season = next
               .where((s) => s.path == season.path)
               .firstOrNull;
         });
@@ -572,9 +599,20 @@ class _SeriesPageState extends State<SeriesPage> {
   }
 
   Widget _seasonCard(SeasonData season) {
-    final cover = season.episodes.isNotEmpty
-        ? season.episodes.first.thumbnailPath
-        : '';
+    // 封面：轻量模式下 episodes 为空，改用异步懒加载的季封面。
+    final coverFuture = _seasonCoverFutures[season.path];
+    final coverWidget = coverFuture == null
+        ? _folderIcon()
+        : FutureBuilder<String?>(
+            future: coverFuture,
+            builder: (ctx, snap) {
+              if (snap.hasData && (snap.data ?? '').isNotEmpty) {
+                return Image.file(File(snap.data!), fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _folderIcon());
+              }
+              return _folderIcon();
+            },
+          );
     return GestureDetector(
       onTap: () => _enterSeason(season),
       onLongPress: () => _seasonMenu(season),
@@ -583,10 +621,7 @@ class _SeriesPageState extends State<SeriesPage> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            cover.isNotEmpty
-                ? Image.file(File(cover), fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => _folderIcon())
-                : _folderIcon(),
+            coverWidget,
             Positioned(
               left: 0,
               right: 0,
@@ -607,7 +642,7 @@ class _SeriesPageState extends State<SeriesPage> {
                         style: const TextStyle(color: Colors.white, fontSize: 14),
                         maxLines: 1, overflow: TextOverflow.ellipsis),
                     const SizedBox(height: 2),
-                    Text('${season.episodes.length} 集',
+                    Text('${season.episodeCount} 集',
                         style: const TextStyle(color: Colors.grey, fontSize: 12)),
                   ],
                 ),

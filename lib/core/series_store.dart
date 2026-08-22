@@ -96,20 +96,24 @@ class SeriesStore {
     }
   }
 
+  /// 路径归一化：去掉尾部可能存在的分隔符，避免「a/b」与「a/b/」被当成不同 key。
+  static String _norm(String p) => p.replaceAll(RegExp(r'[/\\]+$'), '');
+
   /// 获取某季的自定义名称（为空表示未自定义，应使用文件夹名）。
   static Future<String> getSeasonLabel(String seasonPath) async {
     await _ensureSeasonLabels();
-    return _seasonLabels[seasonPath] ?? '';
+    return _seasonLabels[_norm(seasonPath)] ?? '';
   }
 
   /// 设置某季的自定义名称（空字符串表示恢复为文件夹名）。
   static Future<void> setSeasonLabel(String seasonPath, String label) async {
     await _ensureSeasonLabels();
+    final key = _norm(seasonPath);
     final trimmed = label.trim();
     if (trimmed.isEmpty) {
-      _seasonLabels.remove(seasonPath);
+      _seasonLabels.remove(key);
     } else {
-      _seasonLabels[seasonPath] = trimmed;
+      _seasonLabels[key] = trimmed;
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keySeasonLabels, jsonEncode(_seasonLabels));
