@@ -4,7 +4,9 @@ import 'audio/audio_player_handler.dart';
 import 'core/app_settings.dart';
 import 'debug/diag.dart';
 import 'models/local_video_model.dart';
+import 'models/series_resume.dart';
 import 'pages/home_page.dart';
+import 'pages/series_page.dart';
 import 'pages/video_play_page.dart';
 
 Future<void> main() async {
@@ -94,12 +96,21 @@ class MyApp extends StatelessWidget {
         switch (settings.name) {
           case '/':
             return MaterialPageRoute(builder: (_) => const HomePage());
+          case '/series':
+            return MaterialPageRoute(builder: (_) => const SeriesPage());
           case '/play':
             final args = settings.arguments as Map<String, dynamic>;
             final videos = args['videos'] as List<LocalVideoModel>;
             final index = args['index'] as int;
+            final resumePosition = args['resumePosition'] as Duration?;
+            final seriesContext = args['seriesContext'] as SeriesPlayContext?;
             return MaterialPageRoute(
-              builder: (_) => VideoPlayPage(videos: videos, initialIndex: index),
+              builder: (_) => VideoPlayPage(
+                videos: videos,
+                initialIndex: index,
+                resumePosition: resumePosition,
+                seriesContext: seriesContext,
+              ),
             );
           default:
             return MaterialPageRoute(builder: (_) => const HomePage());

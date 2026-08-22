@@ -10,20 +10,28 @@ import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../audio/audio_player_handler.dart';
 import '../core/app_settings.dart';
+import '../core/series_history_store.dart';
 import '../core/sleep_timer.dart';
 import '../core/video_name_store.dart';
 import '../debug/diag.dart';
 import '../models/local_video_model.dart';
+import '../models/series_resume.dart';
 
 /// 播放页容器：底部竖向滑动切换视频（抖音式）。
 /// 页面级统一管理：横屏、当前激活序号、全局后台开关（来自设置）。
 class VideoPlayPage extends StatefulWidget {
   final List<LocalVideoModel> videos;
   final int initialIndex;
+  /// 续播起始位置（追剧页「快速续播」/ 单集断点用），为 null 表示从 0 开始。
+  final Duration? resumePosition;
+  /// 追剧播放上下文（来自追剧页）。非 null 时播放页会把进度写回 SeriesHistoryStore。
+  final SeriesPlayContext? seriesContext;
 
   const VideoPlayPage({
     required this.videos,
     required this.initialIndex,
+    this.resumePosition,
+    this.seriesContext,
     super.key,
   });
 
@@ -100,6 +108,9 @@ class _VideoPlayPageState extends State<VideoPlayPage> {
               landscape: _landscape,
               pageController: _pageController,
               onToggleOrientation: _toggleOrientation,
+              resumePosition:
+                  index == widget.initialIndex ? widget.resumePosition : null,
+              seriesContext: widget.seriesContext,
             );
           },
         ),
@@ -122,6 +133,8 @@ class VideoPlayItem extends StatefulWidget {
   final ValueNotifier<bool> landscape;
   final PageController pageController;
   final VoidCallback onToggleOrientation;
+  final Duration? resumePosition; // 仅命中 initialIndex 的项才非空
+  final SeriesPlayContext? seriesContext;
 
   const VideoPlayItem({
     required this.model,
@@ -131,6 +144,8 @@ class VideoPlayItem extends StatefulWidget {
     required this.landscape,
     required this.pageController,
     required this.onToggleOrientation,
+    this.resumePosition,
+    this.seriesContext,
     super.key,
   });
 
@@ -149,6 +164,7 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   bool _isPlaying = true;
   bool _playbackIntended = true; // 用户是否希望播放（暂停/定时关闭会置否）
   Timer? _autoHideTimer;
+  Timer? _progressTimer; // 追剧：周期性把播放进度写回历史
   bool _isBackground = false; // 当前是否处于后台（熄屏/切后台），用于前台/后台播放源切换
   // ===== 自定义单击/双击检测 =====
   // Flutter 内置 onTap+onDoubleTap 的双击窗口过严（仅 300ms 且要求两次均为"干净点按"，
@@ -190,9 +206,17 @@ class _VideoPlayItemState extends State<VideoPlayItem>
 
     _vpc = VideoPlayerController.file(File(widget.model.filePath));
     _vpc.addListener(_onVideoChanged);
-    _vpc.initialize().then((_) {
+    _vpc.initialize().then((_) async {
       if (!mounted) return;
       _vpc.setVolume(1); // 前台单引擎：video_player 自身出声（音画一体）
+      // 续播：把画面定位到断点（仅命中 initialIndex 的项有 resumePosition）。
+      if (widget.resumePosition != null &&
+          widget.resumePosition! > Duration.zero &&
+          _vpc.value.isInitialized) {
+        try {
+          await _vpc.seekTo(widget.resumePosition!);
+        } catch (_) {}
+      }
       _chewieController = ChewieController(
         videoPlayerController: _vpc,
         autoPlay: false,
@@ -207,6 +231,14 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     }).catchError((_) {
       if (mounted) setState(() => _initialized = true);
     });
+
+    // 追剧：周期性（每 5s）把当前激活集的进度写回历史，供快速续播使用。
+    if (widget.seriesContext != null) {
+      _progressTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => _saveSeriesProgress(),
+      );
+    }
 
     widget.activeIndex.addListener(_onActiveChanged);
 
@@ -252,8 +284,69 @@ class _VideoPlayItemState extends State<VideoPlayItem>
     _handleComplete();
   }
 
+  /// 追剧：把当前激活集的播放进度写回历史（单集进度 + 上次观看）。
+  void _saveSeriesProgress() {
+    if (widget.seriesContext == null || !mounted) return;
+    if (!_isActive) return; // 只记录正在看的这一集
+    if (widget.index >= widget.seriesContext!.episodePaths.length) return;
+    final path = widget.seriesContext!.episodePaths[widget.index];
+    final pos = _curPos();
+    final dur = _curDur();
+    SeriesHistoryStore.saveProgress(path, pos, dur, completed: false);
+    SeriesHistoryStore.saveLastWatched(
+      seriesPath: widget.seriesContext!.seriesPath,
+      seriesName: widget.seriesContext!.seriesName,
+      seasonPath: widget.seriesContext!.seasonPath,
+      seasonName: widget.seriesContext!.seasonName,
+      episodePath: path,
+      episodeIndex: widget.index,
+      position: pos,
+      duration: dur,
+    );
+  }
+
+  /// 追剧：某一集播放完成后的历史处理。
+  ///  - 顺序模式：把「上次观看」推进到下一集（断点=0），实现看完一集自动续看下一集；
+  ///  - 其它模式：标记本集已看完，上次观看停在本集（断点=0）。
+  void _markSeriesCompleted() {
+    if (widget.seriesContext == null) return;
+    if (widget.index >= widget.seriesContext!.episodePaths.length) return;
+    final ctx = widget.seriesContext!;
+    final path = ctx.episodePaths[widget.index];
+    final dur = _curDur();
+    SeriesHistoryStore.saveProgress(path, Duration.zero, dur, completed: true);
+    if (AppSettings.instance.playMode == PlayMode.sequence) {
+      final next = widget.index + 1;
+      if (next < widget.total && next < ctx.episodePaths.length) {
+        SeriesHistoryStore.saveLastWatched(
+          seriesPath: ctx.seriesPath,
+          seriesName: ctx.seriesName,
+          seasonPath: ctx.seasonPath,
+          seasonName: ctx.seasonName,
+          episodePath: ctx.episodePaths[next],
+          episodeIndex: next,
+          position: Duration.zero,
+          duration: Duration.zero,
+        );
+      }
+    } else {
+      SeriesHistoryStore.saveLastWatched(
+        seriesPath: ctx.seriesPath,
+        seriesName: ctx.seriesName,
+        seasonPath: ctx.seasonPath,
+        seasonName: ctx.seasonName,
+        episodePath: path,
+        episodeIndex: widget.index,
+        position: Duration.zero,
+        duration: dur,
+      );
+    }
+  }
+
   /// 播放完成后的统一后继逻辑：顺序 / 单集循环 / 手动。
   void _handleComplete() {
+    // 追剧：先记录完成（推进/标记），再执行模式后继逻辑。
+    _markSeriesCompleted();
     diag('completed 播放模式=${AppSettings.instance.playMode.name}');
     switch (AppSettings.instance.playMode) {
       case PlayMode.sequence:
@@ -826,6 +919,9 @@ class _VideoPlayItemState extends State<VideoPlayItem>
   @override
   void dispose() {
     _autoHideTimer?.cancel();
+    _progressTimer?.cancel();
+    // 离开播放页：补存一次最终进度（追剧）。
+    _saveSeriesProgress();
     _singleTapTimer?.cancel();
     // 若本页仍是定时关闭的回调持有者，则解绑（避免回调悬空）
     if (SleepTimer.instance.onExpire == _onTimerExpire) {

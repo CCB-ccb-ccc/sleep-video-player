@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'series_page.dart';
 import 'settings_page.dart';
 import 'video_list_page.dart';
 
@@ -35,6 +36,7 @@ class _HomePageState extends State<HomePage> {
         index: _tab,
         children: [
           VideoListPage(onGoSettings: _goSettings),
+          const SeriesPage(),
           const SettingsPage(),
         ],
       ),
@@ -43,11 +45,19 @@ class _HomePageState extends State<HomePage> {
         selectedItemColor: Colors.white,
         unselectedItemColor: Colors.grey,
         currentIndex: _tab,
-        onTap: (i) => setState(() => _tab = i),
+        onTap: (i) {
+          setState(() => _tab = i);
+          // 切到「追剧」tab 时触发续播提示（仅本会话首次）。
+          if (i == 2) SeriesPage.onResumeRequested?.call();
+        },
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.play_circle_fill),
             label: '播放',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.live_tv),
+            label: '追剧',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.settings),

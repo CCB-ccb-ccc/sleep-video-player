@@ -123,6 +123,12 @@ class VideoScanUtils {
     }
   }
 
+  /// 供追剧模块复用：为单个视频文件生成/复用缩略图并读取时长。
+  static Future<LocalVideoModel> buildModel(File file) async {
+    final thumbDir = await _thumbnailDir();
+    return _buildModel(file, thumbDir);
+  }
+
   /// 为单个视频构建模型（生成/复用缩略图、读取时长）
   static Future<LocalVideoModel> _buildModel(
       File file, Directory thumbDir) async {

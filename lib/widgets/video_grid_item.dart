@@ -3,16 +3,20 @@ import 'package:flutter/material.dart';
 import '../core/video_name_store.dart';
 import '../models/local_video_model.dart';
 
-/// 首页网格视频卡片组件（任务 4.3）
+/// 首页 / 追剧 网格视频卡片组件
 class VideoGridItem extends StatelessWidget {
   final LocalVideoModel video;
   final VoidCallback onTap;
   final String displayName; // 视频显示名称（自定义或文件名）
+  final double? progress; // 观看进度（0~1），为 null 表示不显示进度条
+  final bool completed; // 是否已看完（显示右下角对勾）
 
   const VideoGridItem({
     required this.video,
     required this.onTap,
     this.displayName = '',
+    this.progress,
+    this.completed = false,
     super.key,
   });
 
@@ -73,6 +77,28 @@ class VideoGridItem extends StatelessWidget {
                 ),
               ),
             ),
+            // 已看完对勾
+            if (completed)
+              const Positioned(
+                left: 6,
+                bottom: 6,
+                child: Icon(Icons.check_circle,
+                    color: Colors.greenAccent, size: 20),
+              ),
+            // 底部观看进度条
+            if (progress != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: LinearProgressIndicator(
+                  value: progress!.clamp(0.0, 1.0),
+                  backgroundColor: Colors.white24,
+                  valueColor:
+                      const AlwaysStoppedAnimation<Color>(Colors.amber),
+                  minHeight: 3,
+                ),
+              ),
           ],
         ),
       ),
